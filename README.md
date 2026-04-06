@@ -42,9 +42,7 @@
    通过 `tools/story_cli.py` 统一对外暴露 `generate_ideas`、`match_idea_cards`、`store_idea_cards`、`build_idea_packs`、`evaluate_idea_packs`、`build_story_plans`、`build_story_payloads`、`build_story_drafts`、`get_llm_config`、`upsert_llm_provider`、`upsert_llm_model`、`upsert_llm_environment`、`list_idea_cards`、`list_idea_packs`、`list_idea_pack_evaluations`、`list_story_plans`、`list_story_payloads`、`list_story_drafts`、`update_idea_pack_status`、`update_story_plan_status`、`update_story_draft_status`、`save`、`check_structure`、`check_quality`、`inspect` 二十五个动作。
 14. Skill 调用约定
    `SKILL.md`、`references/workflow.md`、`references/quality-checklist.md` 已经接入 CLI 的收尾调用链。
-15. Todoist 开发管理工具
-   通过 `tools/dev_todoist_cli.py` 管理这个仓库在 Todoist 上的项目和任务。
-16. 真实样本回归与报告
+15. 真实样本回归与报告
    通过 `tools/story_regression_runner.py` 和 `tools/story_regression_samples.py` 批量跑真实样本链路，输出 JSON/Markdown 回归报告，统计阶段失败点和失败类型。
 
 重要说明：
@@ -141,17 +139,13 @@ short_novel_write/
 │     ├─ test_story_regression_runner.py
 │     ├─ test_story_quality_checker.py
 │     └─ test_story_structure_checker.py
-├─ docs/
-│  └─ superpowers/
-│     ├─ plans/
-│     └─ specs/
-└─ zhihu-yanxuan-short-story2/
+└─ docs/
 ```
 
 补充说明：
 
-- `zhihu-yanxuan-short-story2/` 是参考项目，不是当前仓库的直接运行入口
-- `docs/superpowers/specs/` 和 `docs/superpowers/plans/` 存的是本仓库的设计和实现过程文档
+- 开发目录里可以保留实现过程文档、参考项目或其他内部资料
+- 发布目录默认只同步可公开的主工具链内容，不会把所有开发辅助材料一并带出去
 
 ## 核心设计
 
@@ -575,73 +569,6 @@ $env:PYTHONDONTWRITEBYTECODE='1'
 - `tests/tools/test_story_regression_runner.py`
 - `tests/tools/test_story_cli.py`
 - `tests/tools/test_story_cli_idea_pipeline.py`
-- `tests/tools/test_dev_todoist_cli.py`
-
-## Dev Todoist 工具
-
-如果你要用 Todoist 管理这个仓库的开发进度，可以使用：
-
-- `tools/dev_todoist_cli.py`
-
-这不是短篇写作功能的一部分，只是 `dev-only` 的项目管理辅助工具。
-
-当前支持的 action：
-
-- `list_projects`
-- `ensure_project`
-- `list_tasks`
-- `create_task`
-- `ensure_task`
-- `bootstrap_project`
-
-认证方式：
-
-- 从环境变量读取 `TODOIST_API_TOKEN`
-
-调用方式同样是：
-
-- 输入：`stdin JSON`
-- 输出：`stdout JSON`
-
-例如：
-
-```powershell
-$env:TODOIST_API_TOKEN = "你的本地 token"
-
-@'
-{"action":"ensure_project","payload":{"project_name":"short_novel_write"}}
-'@ | .\.venv\Scripts\python.exe tools\dev_todoist_cli.py
-```
-
-如果你希望避免重复建任务，可以优先用：
-
-```powershell
-@'
-{"action":"ensure_task","payload":{"project_name":"short_novel_write","content":"Todoist 任务去重能力"}}
-'@ | .\.venv\Scripts\python.exe tools\dev_todoist_cli.py
-```
-
-`ensure_task` 当前的去重规则很保守：
-
-- 只在单个项目内比较
-- 只按 `content` 精确匹配
-- 比较前仅去掉首尾空白
-
-Todoist 设计文档见：
-
-- [Dev Todoist CLI 设计文档](./docs/superpowers/specs/2026-04-02-dev-todoist-cli-design.md)
-
-## 参考项目
-
-仓库里的 [zhihu-yanxuan-short-story2](./zhihu-yanxuan-short-story2/) 是参考项目。
-
-它对当前仓库的价值主要有两点：
-
-- 证明“`SKILL.md + references + scripts`” 这种组织方式是能工作的
-- 提供一个已经比较成熟的短篇写作 skill 作为对照
-
-但当前仓库不会直接照搬它。  
-这个仓库更聚焦“通用短篇写作能力底座”，而不是直接绑定某个平台流程。
 
 ## 相关文档
 
@@ -652,8 +579,6 @@ Todoist 设计文档见：
 - [quality-checklist.md](./references/quality-checklist.md)
 - [开发目录与发布目录隔离方案](./docs/开发目录与发布目录隔离方案.md)
 - [真实样本回归 runner 使用说明](./docs/真实样本回归runner使用说明.md)
-- [Story CLI 设计文档](./docs/superpowers/specs/2026-04-02-story-cli-design.md)
-- [Story CLI 实现计划](./docs/superpowers/plans/2026-04-02-story-cli-implementation.md)
 
 ## 下一步建议
 
