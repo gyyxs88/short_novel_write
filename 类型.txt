@@ -1,0 +1,27 @@
+Action - 动作
+Adventure - 冒险
+Comedy - 喜剧
+Drama - 剧情 / 戏剧
+Fantasy - 奇幻
+Gender Bender - 性转 / 变性
+Harem - 后宫
+Historical - 历史
+Horror - 恐怖
+Martial Arts - 武术
+Mecha - 机甲
+Mystery - 悬疑 / 推理
+Psychological - 心理
+Romance - 浪漫 / 爱情
+School Life - 校园生活
+Sci-fi - 科幻
+Shoujo Ai - 少女爱 / 百合（纯爱）
+Shounen Ai - 少年爱 / 耽美（纯爱）
+Slice of Life - 日常生活 / 治愈系 
+Sports - 体育
+Supernatural - 超自然
+Tragedy - 悲剧
+Wuxia - 武侠
+Xianxia - 仙侠
+Xuanhuan - 玄幻 
+Yaoi - 耽美 / 男同 (指男性之间的浪漫或性关系，通常比Shounen Ai更露骨)
+Yuri - 百合 / 女同 (指女性之间的浪漫或性关系，通常比Shoujo Ai更露骨)
