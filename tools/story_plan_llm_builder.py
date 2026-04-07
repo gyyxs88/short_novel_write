@@ -20,6 +20,12 @@ from tools.story_idea_pack_llm_builder import (
     resolve_api_key_for_route,
     resolve_header_values,
 )
+from tools.story_token_usage import (
+    build_empty_token_usage,
+    extract_token_usage_from_response,
+    merge_token_usages,
+    normalize_token_usage,
+)
 from tools.story_plan_builder import (
     build_plan_context,
     normalize_plan_count,
@@ -378,6 +384,7 @@ def build_llm_story_plans_from_route(
     extra_headers = resolve_header_values(normalized_route["header_env_names"])
 
     last_error: LlmResponseError | None = None
+    total_token_usage = build_empty_token_usage()
     for _repair_attempt_index in range(MAX_PLAN_REPAIR_ATTEMPTS + 1):
         if normalized_route["api_mode"] == "responses":
             request_payload = build_story_plan_responses_payload(
@@ -415,6 +422,10 @@ def build_llm_story_plans_from_route(
             timeout_seconds=normalized_route.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS),
             extra_headers=extra_headers,
         )
+        total_token_usage = merge_token_usages(
+            total_token_usage,
+            extract_token_usage_from_response(response_payload),
+        )
         if normalized_route["api_mode"] == "responses":
             output_text = extract_responses_output_text(response_payload)
         else:
@@ -430,14 +441,15 @@ def build_llm_story_plans_from_route(
                     target_chapter_count=normalized_target_chapter_count,
                     plan_count=normalized_plan_count,
                     provider_response_id=str(response_payload.get("id", "")).strip(),
-                )
+                ),
+                "token_usage": total_token_usage,
             }
         except LlmResponseError as exc:
-            last_error = exc
+            last_error = LlmResponseError(str(exc), token_usage=total_token_usage)
             continue
 
     if last_error is None:
-        raise LlmResponseError("LLM 方案生成失败。")
+        raise LlmResponseError("LLM 方案生成失败。", token_usage=total_token_usage)
     raise last_error
 
 
@@ -457,6 +469,7 @@ def build_llm_story_plans_with_fallbacks(
         raise LlmConfigError("agent_fallback 必须是布尔值。")
 
     attempts: list[dict[str, Any]] = []
+    total_token_usage = build_empty_token_usage()
     for index, route in enumerate(routes, start=1):
         route_snapshot = describe_route(route)
         try:
@@ -468,16 +481,22 @@ def build_llm_story_plans_with_fallbacks(
                 plan_count=plan_count,
                 transport=transport,
             )
+            current_token_usage = built.get("token_usage", {})
+            total_token_usage = merge_token_usages(total_token_usage, current_token_usage)
             success_attempt = {
                 "attempt_index": index,
                 **route_snapshot,
                 "status": "success",
+                "token_usage": normalize_token_usage(current_token_usage),
             }
             built["attempt_count"] = len(attempts) + 1
             built["fallback_used"] = len(attempts) > 0
             built["attempts"] = [*attempts, success_attempt]
+            built["token_usage"] = total_token_usage
             return built
         except (LlmConfigError, LlmTransportError, LlmResponseError) as exc:
+            current_token_usage = getattr(exc, "token_usage", {})
+            total_token_usage = merge_token_usages(total_token_usage, current_token_usage)
             attempts.append(
                 {
                     "attempt_index": index,
@@ -485,6 +504,7 @@ def build_llm_story_plans_with_fallbacks(
                     "status": "failed",
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
+                    "token_usage": normalize_token_usage(current_token_usage),
                 }
             )
 
@@ -495,6 +515,7 @@ def build_llm_story_plans_with_fallbacks(
         message,
         attempts=attempts,
         agent_fallback_required=agent_fallback,
+        token_usage=total_token_usage,
     )
 
 

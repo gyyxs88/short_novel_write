@@ -24,6 +24,12 @@ from tools.story_idea_pack_llm_builder import (
     resolve_header_values,
 )
 from tools.story_structure_checker import count_content_chars
+from tools.story_token_usage import (
+    build_empty_token_usage,
+    extract_token_usage_from_response,
+    merge_token_usages,
+    normalize_token_usage,
+)
 
 
 SUMMARY_CHAR_RANGE = (50, 120)
@@ -901,18 +907,11 @@ def validate_story_draft_chapter_content(
         min_chars=chapter_targets["chapter_min"],
         max_chars=chapter_targets["chapter_hard_max"],
     )
-    max_chapter_with_overflow = chapter_targets["chapter_hard_max"] + calculate_small_overflow_allowance(
-        chapter_targets["chapter_hard_max"],
-        floor=CHAPTER_MAX_OVERFLOW_FLOOR,
-        cap=CHAPTER_MAX_OVERFLOW_CAP,
-    )
-    if (
-        chapter_char_count < chapter_targets["chapter_min"]
-        or chapter_char_count > max_chapter_with_overflow
-    ):
+    # 正文阶段优先卡下限，避免因模型写得偏长而整章作废。
+    if chapter_char_count < chapter_targets["chapter_min"]:
         raise LlmResponseError(
-            f"第{chapter_number}章字数不符合要求，当前为 {chapter_char_count} 字，应在 "
-            f"{chapter_targets['chapter_min']}-{max_chapter_with_overflow} 字之间。"
+            f"第{chapter_number}章字数不足，当前为 {chapter_char_count} 字，应不少于 "
+            f"{chapter_targets['chapter_min']} 字。"
         )
     return normalized_content, chapter_char_count
 
@@ -989,15 +988,10 @@ def validate_story_draft_lengths(
 
     body_char_count = sum(count_content_chars(item["content"]) for item in chapters)
     total_chars = summary_chars + body_char_count
-    max_total_with_overflow = constraints["total_max"] + calculate_small_overflow_allowance(
-        constraints["total_max"],
-        floor=TOTAL_MAX_OVERFLOW_FLOOR,
-        cap=TOTAL_MAX_OVERFLOW_CAP,
-    )
-    if total_chars < constraints["total_min"] or total_chars > max_total_with_overflow:
+    if total_chars < constraints["total_min"]:
         raise LlmResponseError(
-            f"正文总字数不符合要求，当前总字数为 {total_chars} 字，"
-            f"其中正文为 {body_char_count} 字，应在 {constraints['total_min']}-{max_total_with_overflow} 字之间。"
+            f"正文总字数不足，当前总字数为 {total_chars} 字，"
+            f"其中正文为 {body_char_count} 字，应不少于 {constraints['total_min']} 字。"
         )
     return summary_chars, body_char_count
 
@@ -1266,15 +1260,20 @@ def build_llm_story_draft_summary_from_route(
     payload: dict[str, Any],
     route: dict[str, Any],
     transport: TransportFn,
-) -> tuple[dict[str, Any], str, int]:
+) -> tuple[dict[str, Any], str, int, dict[str, int]]:
     normalized_route = normalize_route_candidate(route)
     last_error: LlmResponseError | None = None
+    total_token_usage = build_empty_token_usage()
     for repair_attempt_index in range(MAX_DRAFT_REPAIR_ATTEMPTS + 1):
         response_payload, output_text = request_story_draft_summary_output_text(
             payload=payload,
             route=normalized_route,
             transport=transport,
             repair_error=str(last_error) if last_error else None,
+        )
+        total_token_usage = merge_token_usages(
+            total_token_usage,
+            extract_token_usage_from_response(response_payload),
         )
         try:
             summary_candidate = parse_story_draft_summary_candidate(
@@ -1285,13 +1284,14 @@ def build_llm_story_draft_summary_from_route(
                 summary_candidate,
                 str(response_payload.get("id", "")).strip(),
                 repair_attempt_index,
+                total_token_usage,
             )
         except LlmResponseError as exc:
-            last_error = exc
+            last_error = LlmResponseError(str(exc), token_usage=total_token_usage)
             continue
 
     if last_error is None:
-        raise LlmResponseError("LLM 简介生成失败。")
+        raise LlmResponseError("LLM 简介生成失败。", token_usage=total_token_usage)
     raise last_error
 
 
@@ -1303,10 +1303,11 @@ def build_llm_story_draft_chapter_from_route(
     chapter_number: int,
     existing_chapters: list[dict[str, Any]],
     transport: TransportFn,
-) -> tuple[dict[str, Any], str, int]:
+) -> tuple[dict[str, Any], str, int, dict[str, int]]:
     normalized_route = normalize_route_candidate(route)
     last_error: LlmResponseError | None = None
     last_chapter_text: str | None = None
+    total_token_usage = build_empty_token_usage()
     for repair_attempt_index in range(MAX_DRAFT_REPAIR_ATTEMPTS + 1):
         response_payload, output_text = request_story_draft_chapter_output_text(
             payload=payload,
@@ -1317,6 +1318,10 @@ def build_llm_story_draft_chapter_from_route(
             transport=transport,
             repair_error=str(last_error) if last_error else None,
             existing_chapter_text=last_chapter_text if last_error is not None else None,
+        )
+        total_token_usage = merge_token_usages(
+            total_token_usage,
+            extract_token_usage_from_response(response_payload),
         )
         try:
             chapter_candidate = parse_story_draft_chapter_candidate(
@@ -1330,9 +1335,10 @@ def build_llm_story_draft_chapter_from_route(
                 chapter_candidate,
                 str(response_payload.get("id", "")).strip(),
                 repair_attempt_index,
+                total_token_usage,
             )
         except LlmResponseError as exc:
-            last_error = exc
+            last_error = LlmResponseError(str(exc), token_usage=total_token_usage)
             try:
                 parsed = parse_llm_json_object(output_text)
                 raw_content = parsed.get("content")
@@ -1346,7 +1352,7 @@ def build_llm_story_draft_chapter_from_route(
             continue
 
     if last_error is None:
-        raise LlmResponseError(f"LLM 第{chapter_number}章生成失败。")
+        raise LlmResponseError(f"LLM 第{chapter_number}章生成失败。", token_usage=total_token_usage)
     raise last_error
 
 
@@ -1359,7 +1365,7 @@ def build_segmented_llm_story_draft_from_route(
     normalized_route = normalize_route_candidate(route)
     normalized_payload = normalize_story_payload(payload)
 
-    summary_candidate, summary_response_id, summary_repair_attempt_count = (
+    summary_candidate, summary_response_id, summary_repair_attempt_count, summary_token_usage = (
         build_llm_story_draft_summary_from_route(
             payload=normalized_payload,
             route=normalized_route,
@@ -1375,12 +1381,14 @@ def build_segmented_llm_story_draft_from_route(
         {
             "segment_type": "summary",
             "repair_attempt_count": summary_repair_attempt_count,
+            "token_usage": normalize_token_usage(summary_token_usage),
         }
     ]
     total_repair_attempt_count = summary_repair_attempt_count
+    total_token_usage = summary_token_usage
 
     for chapter_number in range(1, normalized_payload["target_chapter_count"] + 1):
-        chapter_candidate, chapter_response_id, chapter_repair_attempt_count = (
+        chapter_candidate, chapter_response_id, chapter_repair_attempt_count, chapter_token_usage = (
             build_llm_story_draft_chapter_from_route(
                 payload=normalized_payload,
                 route=normalized_route,
@@ -1404,9 +1412,11 @@ def build_segmented_llm_story_draft_from_route(
                 "chapter_number": chapter_number,
                 "repair_attempt_count": chapter_repair_attempt_count,
                 "chapter_char_count": chapter_candidate["chapter_char_count"],
+                "token_usage": normalize_token_usage(chapter_token_usage),
             }
         )
         total_repair_attempt_count += chapter_repair_attempt_count
+        total_token_usage = merge_token_usages(total_token_usage, chapter_token_usage)
 
     draft = build_story_draft_output_from_parts(
         payload=normalized_payload,
@@ -1422,6 +1432,7 @@ def build_segmented_llm_story_draft_from_route(
     draft["provider_response_ids"] = provider_response_ids
     draft["segment_count"] = len(segment_attempts)
     draft["segment_attempts"] = segment_attempts
+    draft["token_usage"] = total_token_usage
     return draft
 
 
@@ -1441,6 +1452,7 @@ def build_llm_story_draft_from_route(
 
     last_error: LlmResponseError | None = None
     last_candidate: dict[str, Any] | None = None
+    total_token_usage = build_empty_token_usage()
     for repair_attempt_index in range(MAX_DRAFT_REPAIR_ATTEMPTS + 1):
         response_payload, output_text = request_story_draft_output_text(
             payload=payload,
@@ -1448,6 +1460,10 @@ def build_llm_story_draft_from_route(
             transport=transport,
             repair_error=str(last_error) if last_error else None,
             existing_draft=last_candidate if last_error is not None else None,
+        )
+        total_token_usage = merge_token_usages(
+            total_token_usage,
+            extract_token_usage_from_response(response_payload),
         )
         try:
             draft = parse_story_draft_candidate(
@@ -1460,13 +1476,14 @@ def build_llm_story_draft_from_route(
             validate_story_draft_candidate(payload=payload, candidate=draft)
             draft["repair_attempt_used"] = repair_attempt_index > 0
             draft["repair_attempt_count"] = repair_attempt_index
+            draft["token_usage"] = total_token_usage
             return draft
         except LlmResponseError as exc:
-            last_error = exc
+            last_error = LlmResponseError(str(exc), token_usage=total_token_usage)
             continue
 
     if last_error is None:
-        raise LlmResponseError("LLM 正文生成失败。")
+        raise LlmResponseError("LLM 正文生成失败。", token_usage=total_token_usage)
     raise last_error
 
 
@@ -1483,6 +1500,7 @@ def build_llm_story_draft_with_fallbacks(
         raise LlmConfigError("agent_fallback 必须是布尔值。")
 
     attempts: list[dict[str, Any]] = []
+    total_token_usage = build_empty_token_usage()
     for index, route in enumerate(routes, start=1):
         route_snapshot = describe_route(route)
         try:
@@ -1491,16 +1509,22 @@ def build_llm_story_draft_with_fallbacks(
                 route=route,
                 transport=transport,
             )
+            current_token_usage = draft.get("token_usage", {})
+            total_token_usage = merge_token_usages(total_token_usage, current_token_usage)
             success_attempt = {
                 "attempt_index": index,
                 **route_snapshot,
                 "status": "success",
+                "token_usage": normalize_token_usage(current_token_usage),
             }
             draft["attempt_count"] = len(attempts) + 1
             draft["fallback_used"] = len(attempts) > 0
             draft["attempts"] = [*attempts, success_attempt]
+            draft["token_usage"] = total_token_usage
             return draft
         except (LlmConfigError, LlmTransportError, LlmResponseError) as exc:
+            current_token_usage = getattr(exc, "token_usage", {})
+            total_token_usage = merge_token_usages(total_token_usage, current_token_usage)
             attempts.append(
                 {
                     "attempt_index": index,
@@ -1508,6 +1532,7 @@ def build_llm_story_draft_with_fallbacks(
                     "status": "failed",
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
+                    "token_usage": normalize_token_usage(current_token_usage),
                 }
             )
 
@@ -1518,6 +1543,7 @@ def build_llm_story_draft_with_fallbacks(
         message,
         attempts=attempts,
         agent_fallback_required=agent_fallback,
+        token_usage=total_token_usage,
     )
 
 

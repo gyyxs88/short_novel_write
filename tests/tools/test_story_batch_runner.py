@@ -2,9 +2,30 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import threading
+import time
 
-from tools.story_regression_runner import run_regression, run_single_sample
-from tools.story_regression_samples import GenerationRoute, RegressionSample, select_builtin_samples
+from tools.story_batch_runner import (
+    initialize_run_database,
+    load_batch_jobs,
+    run_batch_jobs,
+)
+from tools.story_regression_samples import GenerationRoute, RegressionSample
+
+
+def build_sample(job_id: str, *, style: str = "zhihu") -> RegressionSample:
+    return RegressionSample(
+        sample_key=job_id,
+        style=style,
+        prompt=f"{job_id} prompt",
+        idea_pack_route=GenerationRoute(),
+        plan_route=GenerationRoute(),
+        draft_route=GenerationRoute(),
+        target_char_range=(3000, 5000),
+        target_chapter_count=4,
+        candidate_count=2,
+        plan_count=2,
+    )
 
 
 def build_success_response(action: str, data: dict) -> dict:
@@ -15,33 +36,7 @@ def build_success_response(action: str, data: dict) -> dict:
     }
 
 
-def build_error_response(action: str, code: str, message: str, details: dict | None = None) -> dict:
-    return {
-        "ok": False,
-        "action": action,
-        "error": {
-            "code": code,
-            "message": message,
-            "details": details or {},
-        },
-    }
-
-
-def build_sample(sample_key: str, *, style: str = "zhihu") -> RegressionSample:
-    llm_environment = f"{style}_plan_default"
-    draft_environment = f"{style}_draft_default"
-    return RegressionSample(
-        sample_key=sample_key,
-        style=style,
-        prompt=f"{sample_key} prompt",
-        idea_pack_route=GenerationRoute(),
-        plan_route=GenerationRoute(generation_mode="llm", llm_environment=llm_environment),
-        draft_route=GenerationRoute(generation_mode="llm", llm_environment=draft_environment),
-    )
-
-
-def build_fake_invoker(*, fail_prompts: set[str] | None = None):
-    fail_prompts = fail_prompts or set()
+def build_fake_invoker():
     batch_to_prompt: dict[int, str] = {}
     payload_to_prompt: dict[int, str] = {}
     store_counter = {"value": 0}
@@ -154,13 +149,6 @@ def build_fake_invoker(*, fail_prompts: set[str] | None = None):
         if action == "build_story_drafts":
             payload_id = payload["payload_ids"][0]
             prompt = payload_to_prompt[payload_id]
-            if prompt in fail_prompts:
-                return build_error_response(
-                    action,
-                    "UPSTREAM_ERROR",
-                    "未预期异常：The read operation timed out",
-                    {"token_usage": {"prompt_tokens": 40, "completion_tokens": 0, "total_tokens": 40}},
-                )
             return build_success_response(
                 action,
                 {
@@ -168,7 +156,7 @@ def build_fake_invoker(*, fail_prompts: set[str] | None = None):
                     "created_count": 1,
                     "existing_count": 0,
                     "token_usage": {"prompt_tokens": 40, "completion_tokens": 60, "total_tokens": 100},
-                    "items": [{"draft_id": payload_id * 10 + 1}],
+                    "items": [{"draft_id": payload_id * 10 + 1, "prompt": prompt}],
                 },
             )
 
@@ -212,72 +200,138 @@ def build_fake_invoker(*, fail_prompts: set[str] | None = None):
     return invoke
 
 
-def test_select_builtin_samples_supports_set_and_style_filters() -> None:
-    samples = select_builtin_samples(sample_set="verified", styles=["zhihu"])
+def test_initialize_run_database_copies_template_db(tmp_path: Path) -> None:
+    template_db_path = tmp_path / "template.sqlite3"
+    template_db_path.write_bytes(b"demo-template")
+    target_db_path = tmp_path / "run" / "story_ideas.sqlite3"
 
-    assert len(samples) == 2
-    assert all(sample.style == "zhihu" for sample in samples)
-    assert {sample.sample_key for sample in samples} == {
-        "zhihu_wedding_sms",
-        "zhihu_divorce_notice",
-    }
-
-
-def test_run_regression_writes_reports_and_counts_timeout_failures(tmp_path: Path) -> None:
-    first = build_sample("sample-pass")
-    second = build_sample("sample-timeout")
-    report = run_regression(
-        samples=[first, second],
-        output_root=tmp_path,
-        run_name="regression-demo",
-        sample_set="test",
-        invoke_action=build_fake_invoker(fail_prompts={"sample-timeout prompt"}),
+    initialize_run_database(
+        db_path=target_db_path,
+        template_db_path=template_db_path,
     )
 
-    assert report["summary"]["sample_count"] == 2
-    assert report["summary"]["passed_count"] == 1
-    assert report["summary"]["failed_count"] == 1
-    assert report["summary"]["failure_type_counts"] == {"timeout": 1}
-    assert report["summary"]["stage_failure_counts"] == {"build_story_drafts": 1}
-    assert report["summary"]["token_usage"] == {"prompt_tokens": 140, "completion_tokens": 130, "total_tokens": 270}
-    assert Path(report["json_report_path"]).exists()
-    assert Path(report["markdown_report_path"]).exists()
-
-    json_report = json.loads(Path(report["json_report_path"]).read_text(encoding="utf-8"))
-    assert json_report["summary"]["failed_count"] == 1
-    markdown_report = Path(report["markdown_report_path"]).read_text(encoding="utf-8")
-    assert "sample-timeout" in markdown_report
-    assert "build_story_drafts" in markdown_report
+    assert target_db_path.read_bytes() == b"demo-template"
 
 
-def test_run_single_sample_marks_inspect_length_failure(tmp_path: Path) -> None:
-    sample = build_sample("inspect-failed")
-    base_invoke = build_fake_invoker()
+def test_load_batch_jobs_rejects_duplicate_job_ids(tmp_path: Path) -> None:
+    job_file_path = tmp_path / "jobs.json"
+    job_file_path.write_text(
+        json.dumps(
+            [
+                {"job_id": "job-1", "style": "zhihu", "prompt": "prompt-1"},
+                {"job_id": "job-1", "style": "zhihu", "prompt": "prompt-2"},
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
-    def invoke(action: str, payload: dict) -> dict:
-        if action == "inspect":
-            return build_success_response(
-                action,
+    try:
+        load_batch_jobs(job_file_path)
+    except ValueError as exc:
+        assert "job_id 不能重复" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("预期应抛出重复 job_id 错误。")
+
+
+def test_load_batch_jobs_accepts_utf8_bom_json(tmp_path: Path) -> None:
+    job_file_path = tmp_path / "jobs_bom.json"
+    job_file_path.write_text(
+        json.dumps(
+            [
+                {"job_id": "job-bom", "style": "zhihu", "prompt": "prompt-bom"},
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8-sig",
+    )
+
+    jobs = load_batch_jobs(job_file_path)
+
+    assert len(jobs) == 1
+    assert jobs[0].sample_key == "job-bom"
+
+
+def test_load_batch_jobs_rejects_invalid_plan_count_early(tmp_path: Path) -> None:
+    job_file_path = tmp_path / "jobs_invalid_plan_count.json"
+    job_file_path.write_text(
+        json.dumps(
+            [
                 {
-                    "overall_ok": False,
-                    "structure": {
-                        "summary_chars": 180,
-                        "body_chars": 3200,
-                        "issues": ["正文总字数不符合要求。", "简介字数不符合要求。"],
-                    },
-                    "quality": {"issues": []},
-                },
-            )
-        return base_invoke(action, payload)
-
-    result = run_single_sample(
-        sample=sample,
-        db_path=tmp_path / "story.sqlite3",
-        invoke_action=invoke,
+                    "job_id": "job-invalid-plan",
+                    "style": "zhihu",
+                    "prompt": "prompt-invalid-plan",
+                    "plan_count": 2,
+                }
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
     )
 
-    assert result["status"] == "failed"
-    assert result["final_stage"] == "inspect"
-    assert result["failure_type"] == "length_constraint"
-    assert result["stages"][-1]["error"]["code"] == "INSPECT_NOT_PASSABLE"
-    assert result["token_usage"] == {"prompt_tokens": 70, "completion_tokens": 95, "total_tokens": 165}
+    try:
+        load_batch_jobs(job_file_path)
+    except ValueError as exc:
+        assert "plan_count" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("预期应抛出非法 plan_count 错误。")
+
+
+def test_run_batch_jobs_archives_serially_and_writes_reports(tmp_path: Path) -> None:
+    jobs = [build_sample("job-alpha"), build_sample("job-beta")]
+    archive_state = {
+        "active": 0,
+        "max_active": 0,
+        "calls": [],
+    }
+    archive_lock = threading.Lock()
+
+    def fake_archive_job_fn(**kwargs) -> dict:
+        with archive_lock:
+            archive_state["active"] += 1
+            archive_state["max_active"] = max(archive_state["max_active"], archive_state["active"])
+        time.sleep(0.05)
+        with archive_lock:
+            archive_state["calls"].append(kwargs["job_id"])
+            archive_state["active"] -= 1
+        return {
+            "job_id": kwargs["job_id"],
+            "archive_db_path": str(kwargs["archive_db_path"]),
+            "source_db_deleted": kwargs["delete_source_db"],
+            "counts": {"story_drafts": 1},
+            "selected_ids": {"draft_id": 1},
+        }
+
+    report = run_batch_jobs(
+        jobs=jobs,
+        output_root=tmp_path,
+        run_name="batch-demo",
+        archive_db_path=tmp_path / "archive.sqlite3",
+        max_workers=2,
+        delete_source_db=True,
+        invoke_action=build_fake_invoker(),
+        archive_job_fn=fake_archive_job_fn,
+    )
+
+    assert report["summary"]["job_count"] == 2
+    assert report["summary"]["passed_count"] == 2
+    assert report["summary"]["archived_count"] == 2
+    assert report["summary"]["archive_failed_count"] == 0
+    assert report["summary"]["token_usage"] == {
+        "prompt_tokens": 140,
+        "completion_tokens": 190,
+        "total_tokens": 330,
+    }
+    assert Path(report["json_report_path"]).exists() is True
+    assert Path(report["markdown_report_path"]).exists() is True
+    assert archive_state["max_active"] == 1
+    assert set(archive_state["calls"]) == {"job-alpha", "job-beta"}
+
+    first_job = report["jobs"][0]
+    assert Path(first_job["report_json_path"]).exists() is True
+    assert Path(first_job["report_markdown_path"]).exists() is True
+    assert first_job["archive"]["status"] == "archived"
+    assert first_job["archive"]["source_db_deleted"] is True

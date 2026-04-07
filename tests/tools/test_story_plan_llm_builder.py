@@ -132,6 +132,7 @@ def test_build_llm_story_plans_supports_chat_completions_provider() -> None:
         captured["payload"] = payload
         return {
             "id": "chatcmpl_plan_123",
+            "usage": {"prompt_tokens": 210, "completion_tokens": 390, "total_tokens": 600},
             "choices": [{"message": {"content": json.dumps(build_mock_plan_payload(), ensure_ascii=False)}}],
         }
 
@@ -149,6 +150,7 @@ def test_build_llm_story_plans_supports_chat_completions_provider() -> None:
     assert built["plans"][0]["provider_name"] == "openrouter"
     assert built["plans"][0]["model_name"] == "qwen/qwen3.6-plus:free"
     assert built["plans"][0]["provider_response_id"] == "chatcmpl_plan_123"
+    assert built["token_usage"] == {"prompt_tokens": 210, "completion_tokens": 390, "total_tokens": 600}
     assert built["plans"][0]["writing_brief"]["target_char_range"] == [10000, 30000]
     assert captured["api_url"] == "https://openrouter.ai/api/v1/chat/completions"
     request_payload = captured["payload"]
@@ -167,6 +169,7 @@ def test_build_llm_story_plans_supports_responses_mode() -> None:
     ) -> dict:
         return {
             "id": "resp_plan_123",
+            "usage": {"input_tokens": 120, "output_tokens": 240, "total_tokens": 360},
             "output": [
                 {
                     "type": "message",
@@ -194,6 +197,7 @@ def test_build_llm_story_plans_supports_responses_mode() -> None:
     assert len(built["plans"]) == 4
     assert built["plans"][0]["provider_response_id"] == "resp_plan_123"
     assert built["plans"][0]["api_mode"] == "responses"
+    assert built["token_usage"] == {"prompt_tokens": 120, "completion_tokens": 240, "total_tokens": 360}
 
 
 def test_build_llm_story_plans_supports_deepseek_json_mode() -> None:

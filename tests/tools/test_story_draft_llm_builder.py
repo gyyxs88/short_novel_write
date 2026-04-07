@@ -125,6 +125,20 @@ def build_short_invalid_draft_payload() -> dict[str, object]:
     }
 
 
+def build_overlong_non_segmented_draft_payload() -> dict[str, object]:
+    return {
+        "summary": build_exact_length_summary(100),
+        "chapters": [
+            {"chapter_number": 1, "content": build_exact_length_content(1600)},
+            {"chapter_number": 2, "content": build_exact_length_content(1600)},
+            {"chapter_number": 3, "content": build_exact_length_content(1600)},
+            {"chapter_number": 4, "content": build_exact_length_content(1600)},
+            {"chapter_number": 5, "content": build_exact_length_content(1600)},
+            {"chapter_number": 6, "content": build_exact_length_content(1600)},
+        ],
+    }
+
+
 def build_long_segmented_payload() -> dict[str, object]:
     long_plan = json.loads(json.dumps(PLAN, ensure_ascii=False))
     long_plan["writing_brief"]["target_char_range"] = [10000, 20000]
@@ -161,6 +175,7 @@ def test_build_llm_story_draft_supports_chat_completions_provider() -> None:
         captured["payload"] = payload
         return {
             "id": "chatcmpl_draft_123",
+            "usage": {"prompt_tokens": 300, "completion_tokens": 900, "total_tokens": 1200},
             "choices": [{"message": {"content": json.dumps(build_mock_draft_payload(), ensure_ascii=False)}}],
         }
 
@@ -177,6 +192,7 @@ def test_build_llm_story_draft_supports_chat_completions_provider() -> None:
     assert built["provider_name"] == "openrouter"
     assert built["model_name"] == "qwen/qwen3.6-plus:free"
     assert built["provider_response_id"] == "chatcmpl_draft_123"
+    assert built["token_usage"] == {"prompt_tokens": 300, "completion_tokens": 900, "total_tokens": 1200}
     assert "## 正文" in built["content_markdown"]
     assert built["body_char_count"] >= 6
     request_payload = captured["payload"]
@@ -409,6 +425,39 @@ def test_build_llm_story_draft_accepts_small_summary_overflow_without_trimming()
     assert "## 简介" in built["content_markdown"]
 
 
+def test_build_llm_story_draft_accepts_overlong_total_when_minimum_is_met() -> None:
+    payload = build_story_payload(plan=PLAN)
+    call_count = {"value": 0}
+
+    def fake_transport(
+        *,
+        api_url: str,
+        api_key: str,
+        payload: dict,
+        timeout_seconds: int,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict:
+        call_count["value"] += 1
+        return {
+            "id": "chatcmpl_overlong_total",
+            "choices": [{"message": {"content": json.dumps(build_overlong_non_segmented_draft_payload(), ensure_ascii=False)}}],
+        }
+
+    built = build_llm_story_draft(
+        payload=payload,
+        provider="openrouter",
+        api_mode="chat_completions",
+        model="qwen/qwen3.6-plus:free",
+        api_key="test-key",
+        transport=fake_transport,
+    )
+
+    assert call_count["value"] == 1
+    assert built["repair_attempt_used"] is False
+    assert built["summary_char_count"] == 100
+    assert built["body_char_count"] == 9600
+
+
 def test_build_llm_story_draft_retries_large_summary_overflow() -> None:
     payload = build_story_payload(plan=PLAN)
     call_count = {"value": 0}
@@ -466,6 +515,7 @@ def test_build_llm_story_draft_uses_segmented_generation_for_long_targets() -> N
             response_ids.append("seg_summary_1")
             return {
                 "id": "seg_summary_1",
+                "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
                 "choices": [{"message": {"content": json.dumps({"summary": build_segmented_summary()}, ensure_ascii=False)}}],
             }
 
@@ -475,6 +525,7 @@ def test_build_llm_story_draft_uses_segmented_generation_for_long_targets() -> N
                 response_ids.append(response_id)
                 return {
                     "id": response_id,
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 200, "total_tokens": 300},
                     "choices": [
                         {
                             "message": {
@@ -510,6 +561,7 @@ def test_build_llm_story_draft_uses_segmented_generation_for_long_targets() -> N
     assert 9880 <= built["body_char_count"] <= 19950
     assert built["provider_response_ids"] == response_ids
     assert built["provider_response_id"] == ",".join(response_ids)
+    assert built["token_usage"] == {"prompt_tokens": 620, "completion_tokens": 1210, "total_tokens": 1830}
     assert "你当前只负责写这篇故事的简介 summary" in prompts[0]
     assert "当前要写第1章" in prompts[1]
     assert "当前要写第6章" in prompts[6]
@@ -675,6 +727,61 @@ def test_build_llm_story_draft_accepts_plain_text_segmented_chapter_output() -> 
     assert built["repair_attempt_used"] is False
     assert len(built["chapters"]) == 6
     assert built["body_char_count"] == 10800
+
+
+def test_build_llm_story_draft_accepts_segmented_overlong_chapter_when_total_is_enough() -> None:
+    payload = build_douban_long_segmented_payload()
+
+    def fake_transport(
+        *,
+        api_url: str,
+        api_key: str,
+        payload: dict,
+        timeout_seconds: int,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict:
+        prompt = payload["messages"][1]["content"]
+        if "你当前只负责写这篇故事的简介 summary" in prompt:
+            return {
+                "id": "seg_summary_large_chapter",
+                "choices": [{"message": {"content": json.dumps({"summary": build_segmented_summary()}, ensure_ascii=False)}}],
+            }
+
+        for chapter_number in range(1, 7):
+            if f"当前要写第{chapter_number}章" in prompt:
+                chapter_length = 9000 if chapter_number == 1 else 1500
+                return {
+                    "id": f"seg_large_chapter_{chapter_number}",
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "chapter_number": chapter_number,
+                                        "content": build_exact_length_content(chapter_length),
+                                    },
+                                    ensure_ascii=False,
+                                )
+                            }
+                        }
+                    ],
+                }
+
+        raise AssertionError(f"未识别的 prompt：{prompt}")
+
+    built = build_llm_story_draft(
+        payload=payload,
+        provider="openrouter",
+        api_mode="chat_completions",
+        model="qwen/qwen3.6-plus:free",
+        api_key="test-key",
+        transport=fake_transport,
+    )
+
+    assert built["segmented_generation"] is True
+    assert built["repair_attempt_used"] is False
+    assert count_content_chars(built["chapters"][0]["content"]) == 9000
+    assert built["body_char_count"] == 16500
 
 
 def test_build_llm_story_draft_retries_segmented_chapter_when_invalid() -> None:

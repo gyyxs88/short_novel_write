@@ -99,3 +99,31 @@ def test_check_story_markdown_accepts_small_overflow() -> None:
 
     assert report.is_valid is True
     assert report.summary_chars == 125
+
+
+def test_check_story_markdown_accepts_overlong_body_when_minimum_is_met() -> None:
+    overlong_story = """# 雨夜来信
+
+## 简介
+
+""" + ("概" * 80) + """
+
+## 正文
+
+### 1
+
+""" + ("文" * 600) + """
+
+### 2
+
+""" + ("文" * 600) + """
+"""
+
+    report = check_story_markdown(
+        overlong_story,
+        target_char_range=(60, 500),
+        summary_char_range=(30, 120),
+    )
+
+    assert report.is_valid is True
+    assert report.body_chars == 1200

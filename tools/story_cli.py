@@ -37,6 +37,7 @@ from tools.story_draft_llm_builder import (
     build_llm_story_draft,
     build_llm_story_draft_with_fallbacks,
 )
+from tools.story_archive_manager import ArchiveError, archive_run
 from tools.story_plan_builder import (
     build_deterministic_story_plans,
     normalize_plan_count as normalize_story_plan_count,
@@ -50,6 +51,12 @@ from tools.story_plan_llm_builder import (
 )
 from tools.story_quality_checker import check_story_quality_markdown
 from tools.story_structure_checker import check_story_markdown
+from tools.story_token_usage import (
+    build_empty_token_usage,
+    has_token_usage,
+    merge_token_usages,
+    normalize_token_usage,
+)
 
 
 SUPPORTED_ACTIONS = {
@@ -66,9 +73,20 @@ SUPPORTED_ACTIONS = {
     "build_story_payloads",
     "build_story_drafts",
     "get_llm_config",
+    "export_llm_config",
+    "apply_llm_config",
+    "list_llm_providers",
+    "list_llm_models",
+    "list_llm_environments",
+    "get_llm_provider",
+    "get_llm_model",
+    "get_llm_environment",
     "upsert_llm_provider",
     "upsert_llm_model",
     "upsert_llm_environment",
+    "delete_llm_provider",
+    "delete_llm_model",
+    "delete_llm_environment",
     "list_idea_cards",
     "list_idea_packs",
     "list_idea_pack_evaluations",
@@ -78,6 +96,7 @@ SUPPORTED_ACTIONS = {
     "update_idea_pack_status",
     "update_story_plan_status",
     "update_story_draft_status",
+    "archive_run",
 }
 
 
@@ -121,6 +140,17 @@ def build_error_response(
     if details:
         response["error"]["details"] = details
     return response
+
+
+def append_token_usage_details(
+    details: dict[str, Any] | None,
+    token_usage: dict[str, Any] | None,
+) -> dict[str, Any]:
+    normalized_details = dict(details or {})
+    normalized_token_usage = normalize_token_usage(token_usage)
+    if has_token_usage(normalized_token_usage):
+        normalized_details["token_usage"] = normalized_token_usage
+    return normalized_details
 
 
 def read_request() -> dict[str, Any]:
@@ -242,6 +272,38 @@ def ensure_optional_path_string(
     return value
 
 
+def ensure_optional_string_list(
+    payload: dict[str, Any],
+    field_name: str,
+    action: str,
+) -> list[str] | None:
+    value = payload.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, list) or not value:
+        raise CliRequestError(
+            "INVALID_REQUEST",
+            f"{field_name} 必须是非空字符串数组。",
+            action=action,
+        )
+    normalized: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise CliRequestError(
+                "INVALID_REQUEST",
+                f"{field_name} 必须是非空字符串数组。",
+                action=action,
+            )
+        normalized.append(item.strip())
+    if len(set(normalized)) != len(normalized):
+        raise CliRequestError(
+            "INVALID_REQUEST",
+            f"{field_name} 不能包含重复值。",
+            action=action,
+        )
+    return normalized
+
+
 def get_repository(payload: dict[str, Any], action: str) -> StoryIdeaRepository:
     db_path = payload.get("db_path")
     if db_path is not None and (not isinstance(db_path, str) or not db_path.strip()):
@@ -250,10 +312,34 @@ def get_repository(payload: dict[str, Any], action: str) -> StoryIdeaRepository:
 
 
 def get_llm_config_store(payload: dict[str, Any], action: str) -> StoryLlmConfigStore:
-    config_path = payload.get("llm_config_path")
-    if config_path is not None and (not isinstance(config_path, str) or not config_path.strip()):
-        raise CliRequestError("INVALID_REQUEST", "llm_config_path 必须是非空字符串。", action=action)
-    return StoryLlmConfigStore(config_path)
+    llm_config_path = payload.get("llm_config_path")
+    if llm_config_path is not None:
+        raise CliRequestError(
+            "INVALID_REQUEST",
+            "llm_config_path 已废弃；LLM 配置现已统一存储在 db_path 对应的 SQLite 里。",
+            action=action,
+        )
+    db_path = payload.get("db_path")
+    if db_path is not None and (not isinstance(db_path, str) or not db_path.strip()):
+        raise CliRequestError("INVALID_REQUEST", "db_path 必须是非空字符串。", action=action)
+    return StoryLlmConfigStore(db_path)
+
+
+def resolve_llm_environment_config(
+    payload: dict[str, Any],
+    action: str,
+    *,
+    llm_environment: str | None,
+    llm_model_keys_override: list[str] | None = None,
+) -> tuple[StoryLlmConfigStore | None, dict[str, Any] | None, list[str] | None]:
+    if llm_environment is None:
+        return None, None, None
+    store = get_llm_config_store(payload, action)
+    environment_config = store.resolve_environment_routes(
+        llm_environment,
+        model_keys_override=llm_model_keys_override,
+    )
+    return store, environment_config, llm_model_keys_override
 
 
 def resolve_content_input(payload: dict[str, Any], action: str) -> str:
@@ -457,6 +543,7 @@ def handle_build_idea_packs(payload: dict[str, Any], action: str) -> dict[str, A
     provider = ensure_optional_string(payload, "provider", action)
     api_mode = ensure_optional_string(payload, "api_mode", action)
     llm_environment = ensure_optional_string(payload, "llm_environment", action)
+    llm_model_keys_override = ensure_optional_string_list(payload, "llm_model_keys_override", action)
     batch_id = payload.get("batch_id")
     card_ids = payload.get("card_ids")
     if (batch_id is None) == (card_ids is None):
@@ -485,10 +572,27 @@ def handle_build_idea_packs(payload: dict[str, Any], action: str) -> dict[str, A
             "llm_environment 只能和 generation_mode=llm 一起使用。",
             action=action,
         )
+    if llm_model_keys_override is not None and llm_environment is None:
+        raise CliRequestError(
+            "INVALID_REQUEST",
+            "llm_model_keys_override 只能和 llm_environment 一起使用。",
+            action=action,
+        )
+    if llm_model_keys_override is not None and generation_mode != "llm":
+        raise CliRequestError(
+            "INVALID_REQUEST",
+            "llm_model_keys_override 只能和 generation_mode=llm 一起使用。",
+            action=action,
+        )
 
     try:
         repository = get_repository(payload, action)
-        llm_config_store = get_llm_config_store(payload, action) if llm_environment else None
+        _llm_config_store, environment_config, llm_model_keys_override = resolve_llm_environment_config(
+            payload,
+            action,
+            llm_environment=llm_environment,
+            llm_model_keys_override=llm_model_keys_override,
+        )
         cards = repository.get_cards_for_build(batch_id=batch_id, card_ids=card_ids)
         created_count = 0
         existing_count = 0
@@ -496,14 +600,13 @@ def handle_build_idea_packs(payload: dict[str, Any], action: str) -> dict[str, A
             resolved_model_name = ""
             resolved_provider_name = ""
             resolved_api_mode = ""
-            environment_config = llm_config_store.resolve_environment_routes(llm_environment)
         else:
             resolved_model_name = model or (DEFAULT_LLM_MODEL if generation_mode == "llm" else "")
             resolved_provider_name = provider or (DEFAULT_PROVIDER if generation_mode == "llm" else "")
             resolved_api_mode = api_mode or (DEFAULT_API_MODE if generation_mode == "llm" else "")
-            environment_config = None
         used_model_config_keys: list[str] = []
         fallback_used_count = 0
+        total_token_usage = build_empty_token_usage()
         items: list[dict[str, Any]] = []
         for card in cards:
             if generation_mode == "llm":
@@ -536,6 +639,8 @@ def handle_build_idea_packs(payload: dict[str, Any], action: str) -> dict[str, A
                     used_model_config_keys.append(model_config_key)
             if built_pack.get("fallback_used"):
                 fallback_used_count += 1
+            current_token_usage = built_pack.get("token_usage", {})
+            total_token_usage = merge_token_usages(total_token_usage, current_token_usage)
             stored_pack = repository.upsert_idea_pack(
                 card_id=card["card_id"],
                 source_mode=built_pack["source_mode"],
@@ -546,6 +651,7 @@ def handle_build_idea_packs(payload: dict[str, Any], action: str) -> dict[str, A
                 model_name=built_pack.get("model_name", ""),
                 model_config_key=built_pack.get("model_config_key", ""),
                 provider_response_id=built_pack.get("provider_response_id", ""),
+                token_usage=current_token_usage,
                 style_reason=built_pack["style_reason"],
                 hook=built_pack["hook"],
                 core_relationship=built_pack["core_relationship"],
@@ -572,6 +678,7 @@ def handle_build_idea_packs(payload: dict[str, Any], action: str) -> dict[str, A
                     "attempt_count": built_pack.get("attempt_count", 1),
                     "fallback_used": bool(built_pack.get("fallback_used", False)),
                     "attempts": built_pack.get("attempts", []),
+                    "token_usage": normalize_token_usage(current_token_usage),
                 }
             )
         return {
@@ -581,10 +688,13 @@ def handle_build_idea_packs(payload: dict[str, Any], action: str) -> dict[str, A
             "api_mode": resolved_api_mode,
             "model_name": resolved_model_name,
             "llm_environment": llm_environment or "",
+            "effective_llm_model_keys": environment_config["effective_model_keys"] if environment_config else [],
+            "llm_model_keys_override": llm_model_keys_override or [],
             "used_model_config_keys": used_model_config_keys,
             "fallback_used_count": fallback_used_count,
             "created_count": created_count,
             "existing_count": existing_count,
+            "token_usage": total_token_usage,
             "items": items,
         }
     except LlmConfigError as exc:
@@ -595,12 +705,22 @@ def handle_build_idea_packs(payload: dict[str, Any], action: str) -> dict[str, A
             error_code,
             str(exc),
             action=action,
-            details={"attempts": exc.attempts},
+            details=append_token_usage_details({"attempts": exc.attempts}, exc.token_usage),
         ) from exc
     except LlmTransportError as exc:
-        raise CliRequestError("UPSTREAM_ERROR", str(exc), action=action) from exc
+        raise CliRequestError(
+            "UPSTREAM_ERROR",
+            str(exc),
+            action=action,
+            details=append_token_usage_details(None, getattr(exc, "token_usage", {})),
+        ) from exc
     except LlmResponseError as exc:
-        raise CliRequestError("UPSTREAM_ERROR", str(exc), action=action) from exc
+        raise CliRequestError(
+            "UPSTREAM_ERROR",
+            str(exc),
+            action=action,
+            details=append_token_usage_details(None, exc.token_usage),
+        ) from exc
     except ValueError as exc:
         raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
 
@@ -609,6 +729,82 @@ def handle_get_llm_config(payload: dict[str, Any], action: str) -> dict[str, Any
     try:
         store = get_llm_config_store(payload, action)
         return store.get_config()
+    except ValueError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+
+
+def handle_export_llm_config(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    try:
+        store = get_llm_config_store(payload, action)
+        snapshot = store.export_config_snapshot()
+        return {
+            "snapshot": snapshot,
+            "counts": snapshot["counts"],
+        }
+    except ValueError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+
+
+def handle_apply_llm_config(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    snapshot = payload.get("snapshot")
+    config = payload.get("config")
+    try:
+        store = get_llm_config_store(payload, action)
+        return store.apply_config_snapshot(snapshot, config=config)
+    except ValueError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+
+
+def handle_list_llm_providers(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    try:
+        store = get_llm_config_store(payload, action)
+        items = store.list_providers()
+        return {"items": items, "count": len(items)}
+    except ValueError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+
+
+def handle_list_llm_models(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    try:
+        store = get_llm_config_store(payload, action)
+        items = store.list_models()
+        return {"items": items, "count": len(items)}
+    except ValueError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+
+
+def handle_list_llm_environments(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    try:
+        store = get_llm_config_store(payload, action)
+        items = store.list_environments()
+        return {"items": items, "count": len(items)}
+    except ValueError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+
+
+def handle_get_llm_provider(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    provider_name = ensure_string_field(payload, "provider_name", action)
+    try:
+        store = get_llm_config_store(payload, action)
+        return store.get_provider(provider_name)
+    except ValueError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+
+
+def handle_get_llm_model(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    model_key = ensure_string_field(payload, "model_key", action)
+    try:
+        store = get_llm_config_store(payload, action)
+        return store.get_model(model_key)
+    except ValueError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+
+
+def handle_get_llm_environment(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    environment_name = ensure_string_field(payload, "environment_name", action)
+    try:
+        store = get_llm_config_store(payload, action)
+        return store.get_environment(environment_name)
     except ValueError as exc:
         raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
 
@@ -724,6 +920,7 @@ def handle_build_story_plans(payload: dict[str, Any], action: str) -> dict[str, 
     provider = ensure_optional_string(payload, "provider", action)
     api_mode = ensure_optional_string(payload, "api_mode", action)
     llm_environment = ensure_optional_string(payload, "llm_environment", action)
+    llm_model_keys_override = ensure_optional_string_list(payload, "llm_model_keys_override", action)
     batch_id = payload.get("batch_id")
     pack_ids = payload.get("pack_ids")
     if (batch_id is None) == (pack_ids is None):
@@ -752,10 +949,27 @@ def handle_build_story_plans(payload: dict[str, Any], action: str) -> dict[str, 
             "llm_environment 只能和 generation_mode=llm 一起使用。",
             action=action,
         )
+    if llm_model_keys_override is not None and llm_environment is None:
+        raise CliRequestError(
+            "INVALID_REQUEST",
+            "llm_model_keys_override 只能和 llm_environment 一起使用。",
+            action=action,
+        )
+    if llm_model_keys_override is not None and generation_mode != "llm":
+        raise CliRequestError(
+            "INVALID_REQUEST",
+            "llm_model_keys_override 只能和 generation_mode=llm 一起使用。",
+            action=action,
+        )
 
     try:
         repository = get_repository(payload, action)
-        llm_config_store = get_llm_config_store(payload, action) if llm_environment else None
+        _llm_config_store, environment_config, llm_model_keys_override = resolve_llm_environment_config(
+            payload,
+            action,
+            llm_environment=llm_environment,
+            llm_model_keys_override=llm_model_keys_override,
+        )
         packs = repository.get_packs_for_story_plan_build(batch_id=batch_id, pack_ids=pack_ids)
         if target_char_range is None:
             pack_styles = {pack["style"] for pack in packs}
@@ -774,14 +988,13 @@ def handle_build_story_plans(payload: dict[str, Any], action: str) -> dict[str, 
             resolved_model_name = ""
             resolved_provider_name = ""
             resolved_api_mode = ""
-            environment_config = llm_config_store.resolve_environment_routes(llm_environment)
         else:
             resolved_model_name = model or (DEFAULT_LLM_MODEL if generation_mode == "llm" else "")
             resolved_provider_name = provider or (DEFAULT_PROVIDER if generation_mode == "llm" else "")
             resolved_api_mode = api_mode or (DEFAULT_API_MODE if generation_mode == "llm" else "")
-            environment_config = None
         used_model_config_keys: list[str] = []
         fallback_used_count = 0
+        total_token_usage = build_empty_token_usage()
         items: list[dict[str, Any]] = []
         for pack in packs:
             if generation_mode == "llm":
@@ -818,6 +1031,7 @@ def handle_build_story_plans(payload: dict[str, Any], action: str) -> dict[str, 
                 attempt_count = built_payload.get("attempt_count", 1)
                 fallback_used = bool(built_payload.get("fallback_used", False))
                 attempts = built_payload.get("attempts", [])
+                current_token_usage = built_payload.get("token_usage", {})
             else:
                 built_plans = build_deterministic_story_plans(
                     pack=pack,
@@ -828,6 +1042,9 @@ def handle_build_story_plans(payload: dict[str, Any], action: str) -> dict[str, 
                 attempt_count = 1
                 fallback_used = False
                 attempts = []
+                current_token_usage = {}
+
+            total_token_usage = merge_token_usages(total_token_usage, current_token_usage)
 
             for built_plan in built_plans:
                 stored_plan = repository.upsert_story_plan(
@@ -843,6 +1060,7 @@ def handle_build_story_plans(payload: dict[str, Any], action: str) -> dict[str, 
                     model_name=built_plan.get("model_name", ""),
                     model_config_key=built_plan.get("model_config_key", ""),
                     provider_response_id=built_plan.get("provider_response_id", ""),
+                    token_usage=current_token_usage,
                     title=built_plan["title"],
                     genre_tone=built_plan["genre_tone"],
                     selling_point=built_plan["selling_point"],
@@ -876,6 +1094,7 @@ def handle_build_story_plans(payload: dict[str, Any], action: str) -> dict[str, 
                         "attempt_count": attempt_count,
                         "fallback_used": fallback_used,
                         "attempts": attempts,
+                        "token_usage": normalize_token_usage(current_token_usage),
                     }
                 )
         return {
@@ -887,10 +1106,13 @@ def handle_build_story_plans(payload: dict[str, Any], action: str) -> dict[str, 
             "api_mode": resolved_api_mode,
             "model_name": resolved_model_name,
             "llm_environment": llm_environment or "",
+            "effective_llm_model_keys": environment_config["effective_model_keys"] if environment_config else [],
+            "llm_model_keys_override": llm_model_keys_override or [],
             "used_model_config_keys": used_model_config_keys,
             "fallback_used_count": fallback_used_count,
             "created_count": created_count,
             "existing_count": existing_count,
+            "token_usage": total_token_usage,
             "items": items,
         }
     except LlmConfigError as exc:
@@ -901,12 +1123,22 @@ def handle_build_story_plans(payload: dict[str, Any], action: str) -> dict[str, 
             error_code,
             str(exc),
             action=action,
-            details={"attempts": exc.attempts},
+            details=append_token_usage_details({"attempts": exc.attempts}, exc.token_usage),
         ) from exc
     except LlmTransportError as exc:
-        raise CliRequestError("UPSTREAM_ERROR", str(exc), action=action) from exc
+        raise CliRequestError(
+            "UPSTREAM_ERROR",
+            str(exc),
+            action=action,
+            details=append_token_usage_details(None, getattr(exc, "token_usage", {})),
+        ) from exc
     except LlmResponseError as exc:
-        raise CliRequestError("UPSTREAM_ERROR", str(exc), action=action) from exc
+        raise CliRequestError(
+            "UPSTREAM_ERROR",
+            str(exc),
+            action=action,
+            details=append_token_usage_details(None, exc.token_usage),
+        ) from exc
     except ValueError as exc:
         raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
 
@@ -978,6 +1210,7 @@ def handle_build_story_drafts(payload: dict[str, Any], action: str) -> dict[str,
     provider = ensure_optional_string(payload, "provider", action)
     api_mode = ensure_optional_string(payload, "api_mode", action)
     llm_environment = ensure_optional_string(payload, "llm_environment", action)
+    llm_model_keys_override = ensure_optional_string_list(payload, "llm_model_keys_override", action)
     batch_id = payload.get("batch_id")
     payload_ids = payload.get("payload_ids")
     if (batch_id is None) == (payload_ids is None):
@@ -1006,10 +1239,27 @@ def handle_build_story_drafts(payload: dict[str, Any], action: str) -> dict[str,
             "llm_environment 只能和 generation_mode=llm 一起使用。",
             action=action,
         )
+    if llm_model_keys_override is not None and llm_environment is None:
+        raise CliRequestError(
+            "INVALID_REQUEST",
+            "llm_model_keys_override 只能和 llm_environment 一起使用。",
+            action=action,
+        )
+    if llm_model_keys_override is not None and generation_mode != "llm":
+        raise CliRequestError(
+            "INVALID_REQUEST",
+            "llm_model_keys_override 只能和 generation_mode=llm 一起使用。",
+            action=action,
+        )
 
     try:
         repository = get_repository(payload, action)
-        llm_config_store = get_llm_config_store(payload, action) if llm_environment else None
+        _llm_config_store, environment_config, llm_model_keys_override = resolve_llm_environment_config(
+            payload,
+            action,
+            llm_environment=llm_environment,
+            llm_model_keys_override=llm_model_keys_override,
+        )
         story_payloads = repository.get_story_payloads_for_draft_build(
             batch_id=batch_id,
             payload_ids=payload_ids,
@@ -1020,14 +1270,13 @@ def handle_build_story_drafts(payload: dict[str, Any], action: str) -> dict[str,
             resolved_model_name = ""
             resolved_provider_name = ""
             resolved_api_mode = ""
-            environment_config = llm_config_store.resolve_environment_routes(llm_environment)
         else:
             resolved_model_name = model or (DEFAULT_LLM_MODEL if generation_mode == "llm" else "")
             resolved_provider_name = provider or (DEFAULT_PROVIDER if generation_mode == "llm" else "")
             resolved_api_mode = api_mode or (DEFAULT_API_MODE if generation_mode == "llm" else "")
-            environment_config = None
         used_model_config_keys: list[str] = []
         fallback_used_count = 0
+        total_token_usage = build_empty_token_usage()
         items: list[dict[str, Any]] = []
         for stored_payload in story_payloads:
             payload_data = {
@@ -1060,11 +1309,15 @@ def handle_build_story_drafts(payload: dict[str, Any], action: str) -> dict[str,
                 attempt_count = built_draft.get("attempt_count", 1)
                 fallback_used = bool(built_draft.get("fallback_used", False))
                 attempts = built_draft.get("attempts", [])
+                current_token_usage = built_draft.get("token_usage", {})
             else:
                 built_draft = build_story_markdown_from_payload(payload_data)
                 attempt_count = 1
                 fallback_used = False
                 attempts = []
+                current_token_usage = {}
+
+            total_token_usage = merge_token_usages(total_token_usage, current_token_usage)
 
             stored_draft = repository.upsert_story_draft(
                 payload_id=stored_payload["payload_id"],
@@ -1074,6 +1327,7 @@ def handle_build_story_drafts(payload: dict[str, Any], action: str) -> dict[str,
                 model_name=built_draft.get("model_name", ""),
                 model_config_key=built_draft.get("model_config_key", ""),
                 provider_response_id=built_draft.get("provider_response_id", ""),
+                token_usage=current_token_usage,
                 title=built_draft["title"],
                 content_markdown=built_draft["content_markdown"],
                 summary_text=built_draft["summary_text"],
@@ -1097,6 +1351,7 @@ def handle_build_story_drafts(payload: dict[str, Any], action: str) -> dict[str,
                     "attempt_count": attempt_count,
                     "fallback_used": fallback_used,
                     "attempts": attempts,
+                    "token_usage": normalize_token_usage(current_token_usage),
                 }
             )
         return {
@@ -1105,10 +1360,13 @@ def handle_build_story_drafts(payload: dict[str, Any], action: str) -> dict[str,
             "api_mode": resolved_api_mode,
             "model_name": resolved_model_name,
             "llm_environment": llm_environment or "",
+            "effective_llm_model_keys": environment_config["effective_model_keys"] if environment_config else [],
+            "llm_model_keys_override": llm_model_keys_override or [],
             "used_model_config_keys": used_model_config_keys,
             "fallback_used_count": fallback_used_count,
             "created_count": created_count,
             "existing_count": existing_count,
+            "token_usage": total_token_usage,
             "items": items,
         }
     except LlmConfigError as exc:
@@ -1119,12 +1377,22 @@ def handle_build_story_drafts(payload: dict[str, Any], action: str) -> dict[str,
             error_code,
             str(exc),
             action=action,
-            details={"attempts": exc.attempts},
+            details=append_token_usage_details({"attempts": exc.attempts}, exc.token_usage),
         ) from exc
     except LlmTransportError as exc:
-        raise CliRequestError("UPSTREAM_ERROR", str(exc), action=action) from exc
+        raise CliRequestError(
+            "UPSTREAM_ERROR",
+            str(exc),
+            action=action,
+            details=append_token_usage_details(None, getattr(exc, "token_usage", {})),
+        ) from exc
     except LlmResponseError as exc:
-        raise CliRequestError("UPSTREAM_ERROR", str(exc), action=action) from exc
+        raise CliRequestError(
+            "UPSTREAM_ERROR",
+            str(exc),
+            action=action,
+            details=append_token_usage_details(None, exc.token_usage),
+        ) from exc
     except ValueError as exc:
         raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
 
@@ -1180,6 +1448,33 @@ def handle_upsert_llm_environment(payload: dict[str, Any], action: str) -> dict[
             agent_fallback=agent_fallback,
             description=description,
         )
+    except ValueError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+
+
+def handle_delete_llm_provider(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    provider_name = ensure_string_field(payload, "provider_name", action)
+    try:
+        store = get_llm_config_store(payload, action)
+        return store.delete_provider(provider_name)
+    except ValueError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+
+
+def handle_delete_llm_model(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    model_key = ensure_string_field(payload, "model_key", action)
+    try:
+        store = get_llm_config_store(payload, action)
+        return store.delete_model(model_key)
+    except ValueError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+
+
+def handle_delete_llm_environment(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    environment_name = ensure_string_field(payload, "environment_name", action)
+    try:
+        store = get_llm_config_store(payload, action)
+        return store.delete_environment(environment_name)
     except ValueError as exc:
         raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
 
@@ -1364,6 +1659,29 @@ def handle_update_story_draft_status(payload: dict[str, Any], action: str) -> di
         raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
 
 
+def handle_archive_run(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    run_dir = ensure_string_field(payload, "run_dir", action)
+    archive_db_path = ensure_optional_path_string(payload, "archive_db_path", action)
+    job_id = ensure_optional_string(payload, "job_id", action)
+    source_db_name = ensure_optional_string(payload, "source_db_name", action) or "story_ideas.sqlite3"
+    report_name = ensure_optional_string(payload, "report_name", action) or "report.json"
+    delete_source_db = payload.get("delete_source_db", False)
+    if not isinstance(delete_source_db, bool):
+        raise CliRequestError("INVALID_REQUEST", "delete_source_db 必须是布尔值。", action=action)
+
+    try:
+        return archive_run(
+            run_dir=run_dir,
+            archive_db_path=archive_db_path,
+            job_id=job_id,
+            delete_source_db=delete_source_db,
+            source_db_name=source_db_name,
+            report_name=report_name,
+        )
+    except ArchiveError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+
+
 def dispatch_action(action: str, payload: dict[str, Any]) -> dict[str, Any]:
     if action == "save":
         return handle_save(payload, action)
@@ -1391,12 +1709,34 @@ def dispatch_action(action: str, payload: dict[str, Any]) -> dict[str, Any]:
         return handle_build_story_drafts(payload, action)
     if action == "get_llm_config":
         return handle_get_llm_config(payload, action)
+    if action == "export_llm_config":
+        return handle_export_llm_config(payload, action)
+    if action == "apply_llm_config":
+        return handle_apply_llm_config(payload, action)
+    if action == "list_llm_providers":
+        return handle_list_llm_providers(payload, action)
+    if action == "list_llm_models":
+        return handle_list_llm_models(payload, action)
+    if action == "list_llm_environments":
+        return handle_list_llm_environments(payload, action)
+    if action == "get_llm_provider":
+        return handle_get_llm_provider(payload, action)
+    if action == "get_llm_model":
+        return handle_get_llm_model(payload, action)
+    if action == "get_llm_environment":
+        return handle_get_llm_environment(payload, action)
     if action == "upsert_llm_provider":
         return handle_upsert_llm_provider(payload, action)
     if action == "upsert_llm_model":
         return handle_upsert_llm_model(payload, action)
     if action == "upsert_llm_environment":
         return handle_upsert_llm_environment(payload, action)
+    if action == "delete_llm_provider":
+        return handle_delete_llm_provider(payload, action)
+    if action == "delete_llm_model":
+        return handle_delete_llm_model(payload, action)
+    if action == "delete_llm_environment":
+        return handle_delete_llm_environment(payload, action)
     if action == "list_idea_cards":
         return handle_list_idea_cards(payload, action)
     if action == "list_idea_packs":
@@ -1415,6 +1755,8 @@ def dispatch_action(action: str, payload: dict[str, Any]) -> dict[str, Any]:
         return handle_update_story_plan_status(payload, action)
     if action == "update_story_draft_status":
         return handle_update_story_draft_status(payload, action)
+    if action == "archive_run":
+        return handle_archive_run(payload, action)
     raise CliRequestError("UNKNOWN_ACTION", f"不支持的 action：{action}", action=action)
 
 

@@ -6,6 +6,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from tools.story_token_usage import normalize_token_usage
+
+
+class AutoClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc, traceback):
+        try:
+            return super().__exit__(exc_type, exc, traceback)
+        finally:
+            self.close()
+
 
 DEFAULT_IDEA_DB_PATH = Path("outputs/idea_pipeline/story_ideas.sqlite3")
 VALID_SOURCE_MODES = {"seed_generate", "prompt_match"}
@@ -60,6 +70,7 @@ CREATE TABLE IF NOT EXISTS idea_packs (
     model_name TEXT NOT NULL,
     model_config_key TEXT NOT NULL,
     provider_response_id TEXT NOT NULL,
+    token_usage_json TEXT NOT NULL DEFAULT '{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}',
     style_reason TEXT NOT NULL,
     hook TEXT NOT NULL,
     core_relationship TEXT NOT NULL,
@@ -119,6 +130,7 @@ CREATE TABLE IF NOT EXISTS story_plans (
     model_name TEXT NOT NULL,
     model_config_key TEXT NOT NULL,
     provider_response_id TEXT NOT NULL,
+    token_usage_json TEXT NOT NULL DEFAULT '{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}',
     title TEXT NOT NULL,
     genre_tone TEXT NOT NULL,
     selling_point TEXT NOT NULL,
@@ -168,6 +180,7 @@ CREATE TABLE IF NOT EXISTS story_drafts (
     model_name TEXT NOT NULL,
     model_config_key TEXT NOT NULL,
     provider_response_id TEXT NOT NULL,
+    token_usage_json TEXT NOT NULL DEFAULT '{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}',
     title TEXT NOT NULL,
     content_markdown TEXT NOT NULL,
     summary_text TEXT NOT NULL,
@@ -237,6 +250,16 @@ def _json_loads_list(raw_text: str) -> list[str]:
     return value
 
 
+def _json_loads_token_usage(raw_text: str | None) -> dict[str, int]:
+    if not isinstance(raw_text, str) or not raw_text.strip():
+        return normalize_token_usage({})
+    try:
+        value = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return normalize_token_usage({})
+    return normalize_token_usage(value)
+
+
 def canonicalize_card_signature(types: list[str], main_tags: list[str]) -> str:
     normalized_types = sorted(_normalize_string_list(types, "types"))
     normalized_main_tags = sorted(_normalize_string_list(main_tags, "main_tags"))
@@ -252,12 +275,44 @@ class StoryIdeaRepository:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(SCHEMA_SQL)
+            self._ensure_token_usage_columns(connection)
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path)
+        connection = sqlite3.connect(self.db_path, factory=AutoClosingConnection)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
+    def _ensure_table_column(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        table_name: str,
+        column_name: str,
+        column_definition: str,
+    ) -> None:
+        existing_columns = {
+            str(row["name"])
+            for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if column_name in existing_columns:
+            return
+        connection.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+        )
+
+    def _ensure_token_usage_columns(self, connection: sqlite3.Connection) -> None:
+        default_value = (
+            "TEXT NOT NULL DEFAULT "
+            "'{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}'"
+        )
+        for table_name in ("idea_packs", "story_plans", "story_drafts"):
+            self._ensure_table_column(
+                connection,
+                table_name=table_name,
+                column_name="token_usage_json",
+                column_definition=default_value,
+            )
 
     def _validate_source_mode(self, source_mode: str) -> str:
         normalized = _normalize_string(source_mode, "source_mode")
@@ -335,6 +390,9 @@ class StoryIdeaRepository:
             "model_name": row["model_name"],
             "model_config_key": row["model_config_key"],
             "provider_response_id": row["provider_response_id"],
+            "token_usage": _json_loads_token_usage(
+                row["token_usage_json"] if "token_usage_json" in row.keys() else None
+            ),
             "style_reason": row["style_reason"],
             "hook": row["hook"],
             "core_relationship": row["core_relationship"],
@@ -397,6 +455,9 @@ class StoryIdeaRepository:
             "model_name": row["model_name"],
             "model_config_key": row["model_config_key"],
             "provider_response_id": row["provider_response_id"],
+            "token_usage": _json_loads_token_usage(
+                row["token_usage_json"] if "token_usage_json" in row.keys() else None
+            ),
             "title": row["title"],
             "genre_tone": row["genre_tone"],
             "selling_point": row["selling_point"],
@@ -460,6 +521,9 @@ class StoryIdeaRepository:
             "model_name": row["model_name"],
             "model_config_key": row["model_config_key"],
             "provider_response_id": row["provider_response_id"],
+            "token_usage": _json_loads_token_usage(
+                row["token_usage_json"] if "token_usage_json" in row.keys() else None
+            ),
             "title": row["title"],
             "content_markdown": row["content_markdown"],
             "summary_text": row["summary_text"],
@@ -701,7 +765,7 @@ class StoryIdeaRepository:
 
         params: list[Any] = []
         sql_lines = [
-            "SELECT DISTINCT p.id, p.card_id, p.source_mode, p.style, p.generation_mode, p.provider_name, p.api_mode, p.model_name, p.model_config_key, p.provider_response_id, p.style_reason, p.hook,",
+            "SELECT DISTINCT p.id, p.card_id, p.source_mode, p.style, p.generation_mode, p.provider_name, p.api_mode, p.model_name, p.model_config_key, p.provider_response_id, p.token_usage_json, p.style_reason, p.hook,",
             "p.core_relationship, p.main_conflict, p.reversal_direction, p.recommended_tags_json,",
             "p.source_cards_json, p.pack_status, p.review_note, p.created_at, p.updated_at",
             "FROM idea_packs p",
@@ -742,6 +806,7 @@ class StoryIdeaRepository:
         model_name: str = "",
         model_config_key: str = "",
         provider_response_id: str = "",
+        token_usage: dict[str, Any] | None = None,
         style_reason: str,
         hook: str,
         core_relationship: str,
@@ -770,6 +835,7 @@ class StoryIdeaRepository:
                     model_name,
                     model_config_key,
                     provider_response_id,
+                    token_usage_json,
                     style_reason,
                     hook,
                     core_relationship,
@@ -808,6 +874,7 @@ class StoryIdeaRepository:
             normalized_provider_response_id = (
                 provider_response_id.strip() if isinstance(provider_response_id, str) else ""
             )
+            normalized_token_usage = normalize_token_usage(token_usage)
             normalized_style_reason = _normalize_string(style_reason, "style_reason")
             normalized_hook = _normalize_string(hook, "hook")
             normalized_core_relationship = _normalize_string(core_relationship, "core_relationship")
@@ -839,6 +906,7 @@ class StoryIdeaRepository:
                     model_name,
                     model_config_key,
                     provider_response_id,
+                    token_usage_json,
                     style_reason,
                     hook,
                     core_relationship,
@@ -851,7 +919,7 @@ class StoryIdeaRepository:
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     card_id,
@@ -863,6 +931,7 @@ class StoryIdeaRepository:
                     normalized_model_name,
                     normalized_model_config_key,
                     normalized_provider_response_id,
+                    _json_dumps(normalized_token_usage),
                     normalized_style_reason,
                     normalized_hook,
                     normalized_core_relationship,
@@ -899,6 +968,7 @@ class StoryIdeaRepository:
                     model_name,
                     model_config_key,
                     provider_response_id,
+                    token_usage_json,
                     style_reason,
                     hook,
                     core_relationship,
@@ -931,7 +1001,7 @@ class StoryIdeaRepository:
     ) -> list[dict[str, Any]]:
         params: list[Any] = []
         sql_lines = [
-            "SELECT DISTINCT p.id, p.card_id, p.source_mode, p.style, p.generation_mode, p.provider_name, p.api_mode, p.model_name, p.model_config_key, p.provider_response_id, p.style_reason, p.hook,",
+            "SELECT DISTINCT p.id, p.card_id, p.source_mode, p.style, p.generation_mode, p.provider_name, p.api_mode, p.model_name, p.model_config_key, p.provider_response_id, p.token_usage_json, p.style_reason, p.hook,",
             "p.core_relationship, p.main_conflict, p.reversal_direction, p.recommended_tags_json,",
             "p.source_cards_json, p.pack_status, p.review_note, p.created_at, p.updated_at",
             "FROM idea_packs p",
@@ -1001,6 +1071,7 @@ class StoryIdeaRepository:
                     model_name,
                     model_config_key,
                     provider_response_id,
+                    token_usage_json,
                     style_reason,
                     hook,
                     core_relationship,
@@ -1043,6 +1114,7 @@ class StoryIdeaRepository:
                     model_name,
                     model_config_key,
                     provider_response_id,
+                    token_usage_json,
                     style_reason,
                     hook,
                     core_relationship,
@@ -1077,6 +1149,7 @@ class StoryIdeaRepository:
         model_name: str = "",
         model_config_key: str = "",
         provider_response_id: str = "",
+        token_usage: dict[str, Any] | None = None,
         title: str,
         genre_tone: str,
         selling_point: str,
@@ -1109,6 +1182,7 @@ class StoryIdeaRepository:
         normalized_provider_response_id = (
             provider_response_id.strip() if isinstance(provider_response_id, str) else ""
         )
+        normalized_token_usage = normalize_token_usage(token_usage)
         normalized_title = _normalize_string(title, "title")
         normalized_genre_tone = _normalize_string(genre_tone, "genre_tone")
         normalized_selling_point = _normalize_string(selling_point, "selling_point")
@@ -1146,6 +1220,7 @@ class StoryIdeaRepository:
                     model_name,
                     model_config_key,
                     provider_response_id,
+                    token_usage_json,
                     title,
                     genre_tone,
                     selling_point,
@@ -1192,6 +1267,7 @@ class StoryIdeaRepository:
                     model_name,
                     model_config_key,
                     provider_response_id,
+                    token_usage_json,
                     title,
                     genre_tone,
                     selling_point,
@@ -1208,7 +1284,7 @@ class StoryIdeaRepository:
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_pack_id,
@@ -1223,6 +1299,7 @@ class StoryIdeaRepository:
                     normalized_model_name,
                     normalized_model_config_key,
                     normalized_provider_response_id,
+                    _json_dumps(normalized_token_usage),
                     normalized_title,
                     normalized_genre_tone,
                     normalized_selling_point,
@@ -1257,6 +1334,7 @@ class StoryIdeaRepository:
                     model_name,
                     model_config_key,
                     provider_response_id,
+                    token_usage_json,
                     title,
                     genre_tone,
                     selling_point,
@@ -1294,7 +1372,7 @@ class StoryIdeaRepository:
         params: list[Any] = []
         sql_lines = [
             "SELECT DISTINCT sp.id, sp.pack_id, sp.source_mode, sp.style, sp.variant_index, sp.variant_key, sp.variant_label, sp.generation_mode,",
-            "sp.provider_name, sp.api_mode, sp.model_name, sp.model_config_key, sp.provider_response_id, sp.title, sp.genre_tone,",
+            "sp.provider_name, sp.api_mode, sp.model_name, sp.model_config_key, sp.provider_response_id, sp.token_usage_json, sp.title, sp.genre_tone,",
             "sp.selling_point, sp.protagonist_profile, sp.protagonist_goal, sp.core_relationship, sp.main_conflict, sp.key_turning_point,",
             "sp.ending_direction, sp.chapter_rhythm_json, sp.writing_brief_json, sp.plan_status, sp.review_note, sp.created_at, sp.updated_at,",
             "p.generation_mode AS pack_generation_mode, p.provider_name AS pack_provider_name, p.model_name AS pack_model_name, p.pack_status",
@@ -1369,6 +1447,7 @@ class StoryIdeaRepository:
                     model_name,
                     model_config_key,
                     provider_response_id,
+                    token_usage_json,
                     title,
                     genre_tone,
                     selling_point,
@@ -1418,6 +1497,7 @@ class StoryIdeaRepository:
                     model_name,
                     model_config_key,
                     provider_response_id,
+                    token_usage_json,
                     title,
                     genre_tone,
                     selling_point,
@@ -1453,7 +1533,7 @@ class StoryIdeaRepository:
         params: list[Any] = []
         sql_lines = [
             "SELECT DISTINCT sp.id, sp.pack_id, sp.source_mode, sp.style, sp.variant_index, sp.variant_key, sp.variant_label, sp.generation_mode,",
-            "sp.provider_name, sp.api_mode, sp.model_name, sp.model_config_key, sp.provider_response_id, sp.title, sp.genre_tone,",
+            "sp.provider_name, sp.api_mode, sp.model_name, sp.model_config_key, sp.provider_response_id, sp.token_usage_json, sp.title, sp.genre_tone,",
             "sp.selling_point, sp.protagonist_profile, sp.protagonist_goal, sp.core_relationship, sp.main_conflict, sp.key_turning_point,",
             "sp.ending_direction, sp.chapter_rhythm_json, sp.writing_brief_json, sp.plan_status, sp.review_note, sp.created_at, sp.updated_at",
             "FROM story_plans sp",
@@ -1651,6 +1731,7 @@ class StoryIdeaRepository:
         model_name: str = "",
         model_config_key: str = "",
         provider_response_id: str = "",
+        token_usage: dict[str, Any] | None = None,
         title: str,
         content_markdown: str,
         summary_text: str,
@@ -1669,6 +1750,7 @@ class StoryIdeaRepository:
         normalized_provider_response_id = (
             provider_response_id.strip() if isinstance(provider_response_id, str) else ""
         )
+        normalized_token_usage = normalize_token_usage(token_usage)
         normalized_title = _normalize_string(title, "title")
         normalized_content_markdown = _normalize_string(content_markdown, "content_markdown")
         normalized_summary_text = _normalize_string(summary_text, "summary_text")
@@ -1691,6 +1773,7 @@ class StoryIdeaRepository:
                     model_name,
                     model_config_key,
                     provider_response_id,
+                    token_usage_json,
                     title,
                     content_markdown,
                     summary_text,
@@ -1724,6 +1807,7 @@ class StoryIdeaRepository:
                     model_name,
                     model_config_key,
                     provider_response_id,
+                    token_usage_json,
                     title,
                     content_markdown,
                     summary_text,
@@ -1733,7 +1817,7 @@ class StoryIdeaRepository:
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_payload_id,
@@ -1743,6 +1827,7 @@ class StoryIdeaRepository:
                     normalized_model_name,
                     normalized_model_config_key,
                     normalized_provider_response_id,
+                    _json_dumps(normalized_token_usage),
                     normalized_title,
                     normalized_content_markdown,
                     normalized_summary_text,
@@ -1765,6 +1850,7 @@ class StoryIdeaRepository:
                     model_name,
                     model_config_key,
                     provider_response_id,
+                    token_usage_json,
                     title,
                     content_markdown,
                     summary_text,
@@ -1793,7 +1879,7 @@ class StoryIdeaRepository:
         params: list[Any] = []
         sql_lines = [
             "SELECT DISTINCT sd.id, sd.payload_id, sd.generation_mode, sd.provider_name, sd.api_mode, sd.model_name, sd.model_config_key, sd.provider_response_id,",
-            "sd.title, sd.content_markdown, sd.summary_text, sd.body_char_count, sd.draft_status, sd.review_note, sd.created_at, sd.updated_at,",
+            "sd.token_usage_json, sd.title, sd.content_markdown, sd.summary_text, sd.body_char_count, sd.draft_status, sd.review_note, sd.created_at, sd.updated_at,",
             "sp.title AS payload_title, sp.style AS payload_style, sp.target_chapter_count",
             "FROM story_drafts sd",
             "JOIN story_payloads sp ON sp.id = sd.payload_id",
@@ -1859,6 +1945,7 @@ class StoryIdeaRepository:
                     model_name,
                     model_config_key,
                     provider_response_id,
+                    token_usage_json,
                     title,
                     content_markdown,
                     summary_text,
@@ -1896,6 +1983,7 @@ class StoryIdeaRepository:
                     model_name,
                     model_config_key,
                     provider_response_id,
+                    token_usage_json,
                     title,
                     content_markdown,
                     summary_text,

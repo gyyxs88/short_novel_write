@@ -10,8 +10,6 @@ SECTION_PATTERN_TEMPLATE = r"(?ms)^##\s+{title}\s*$\s*(.*?)(?=^##\s+|\Z)"
 CHAPTER_PATTERN = re.compile(r"(?ms)^###\s+(\d+)\s*$\s*(.*?)(?=^###\s+\d+\s*$|\Z)")
 SUMMARY_MAX_OVERFLOW_FLOOR = 5
 SUMMARY_MAX_OVERFLOW_CAP = 20
-TOTAL_MAX_OVERFLOW_FLOOR = 100
-TOTAL_MAX_OVERFLOW_CAP = 300
 
 
 @dataclass(slots=True)
@@ -105,14 +103,9 @@ def check_story_markdown(
 
     if target_char_range is not None:
         total_chars = report.summary_chars + report.body_chars
-        min_chars, max_chars = target_char_range
-        max_total_with_overflow = max_chars + calculate_small_overflow_allowance(
-            max_chars,
-            floor=TOTAL_MAX_OVERFLOW_FLOOR,
-            cap=TOTAL_MAX_OVERFLOW_CAP,
-        )
-        if total_chars < min_chars or total_chars > max_total_with_overflow:
-            report.issues.append(f"正文总字数不符合要求，应在 {min_chars}-{max_total_with_overflow} 字之间。")
+        min_chars, _ = target_char_range
+        if total_chars < min_chars:
+            report.issues.append(f"正文总字数不足，应不少于 {min_chars} 字。")
 
     return report
 

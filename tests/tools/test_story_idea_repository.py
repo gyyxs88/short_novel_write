@@ -198,6 +198,7 @@ def test_upsert_pack_allows_deterministic_and_llm_variants_to_coexist(tmp_path: 
         model_name="gpt-5-mini",
         model_config_key="openrouter_gpt5_mini",
         provider_response_id="resp_123",
+        token_usage={"prompt_tokens": 90, "completion_tokens": 30, "total_tokens": 120},
         style_reason="知乎风格更适合这组卡的强冲突表达。",
         hook="她在葬礼结束后收到失踪初恋发来的求救短信。",
         core_relationship="女主与失踪初恋被旧案重新绑回同一条线上。",
@@ -221,6 +222,7 @@ def test_upsert_pack_allows_deterministic_and_llm_variants_to_coexist(tmp_path: 
     assert llm_pack["provider_name"] == "openrouter"
     assert llm_pack["model_name"] == "gpt-5-mini"
     assert llm_pack["model_config_key"] == "openrouter_gpt5_mini"
+    assert llm_pack["token_usage"] == {"prompt_tokens": 90, "completion_tokens": 30, "total_tokens": 120}
     assert llm_pack["pack_id"] != deterministic_pack["pack_id"]
 
     deterministic_items = repo.list_idea_packs(generation_mode="deterministic")
@@ -232,6 +234,7 @@ def test_upsert_pack_allows_deterministic_and_llm_variants_to_coexist(tmp_path: 
     assert len(deterministic_items) == 1
     assert len(llm_items) == 1
     assert llm_items[0]["provider_response_id"] == "resp_123"
+    assert llm_items[0]["token_usage"] == {"prompt_tokens": 90, "completion_tokens": 30, "total_tokens": 120}
 
 
 def test_upsert_and_list_pack_evaluations(tmp_path: Path) -> None:
@@ -354,6 +357,7 @@ def test_upsert_story_plans_and_update_status(tmp_path: Path) -> None:
         variant_key="truth_hunt",
         variant_label="真相追猎型",
         generation_mode="deterministic",
+        token_usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         title="短信背后的真相",
         genre_tone="现代悬疑反转，快节奏推进。",
         selling_point="用婚礼倒计时压迫感推动真相翻面。",
@@ -409,6 +413,7 @@ def test_upsert_story_plans_and_update_status(tmp_path: Path) -> None:
     assert created["status"] == "created"
     assert existing["status"] == "existing"
     assert created["plan_id"] == existing["plan_id"]
+    assert created["token_usage"] == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     updated = repo.update_story_plan_status(
         plan_id=created["plan_id"],
@@ -547,6 +552,7 @@ def test_upsert_story_payload_and_story_draft_flow(tmp_path: Path) -> None:
     draft = repo.upsert_story_draft(
         payload_id=payload["payload_id"],
         generation_mode="deterministic",
+        token_usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         title="短信背后的真相",
         content_markdown="# 短信背后的真相\n\n## 简介\n\n一句简介。\n\n## 正文\n\n### 1\n\n第一章正文。",
         summary_text="一句简介。",
@@ -555,6 +561,7 @@ def test_upsert_story_payload_and_story_draft_flow(tmp_path: Path) -> None:
 
     assert payload["status"] == "created"
     assert draft["status"] == "created"
+    assert draft["token_usage"] == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     assert repo.list_story_payloads(batch_id=stored["batch_id"])[0]["payload_id"] == payload["payload_id"]
     assert repo.list_story_drafts(batch_id=stored["batch_id"])[0]["draft_id"] == draft["draft_id"]
 

@@ -12,6 +12,12 @@ from tools.story_idea_pack_builder import (
     extract_display_label,
     unique_sorted_raw_values,
 )
+from tools.story_token_usage import (
+    build_empty_token_usage,
+    extract_token_usage_from_response,
+    merge_token_usages,
+    normalize_token_usage,
+)
 
 
 DEFAULT_LLM_MODEL = "gpt-5-mini"
@@ -73,9 +79,17 @@ class LlmConfigError(ValueError):
 class LlmTransportError(RuntimeError):
     """调用上游模型服务失败。"""
 
+    def __init__(self, message: str, *, token_usage: dict[str, int] | None = None) -> None:
+        super().__init__(message)
+        self.token_usage = normalize_token_usage(token_usage)
+
 
 class LlmResponseError(RuntimeError):
     """上游返回内容不符合预期。"""
+
+    def __init__(self, message: str, *, token_usage: dict[str, int] | None = None) -> None:
+        super().__init__(message)
+        self.token_usage = normalize_token_usage(token_usage)
 
 
 class LlmExhaustedError(RuntimeError):
@@ -87,10 +101,12 @@ class LlmExhaustedError(RuntimeError):
         *,
         attempts: list[dict[str, Any]],
         agent_fallback_required: bool,
+        token_usage: dict[str, int] | None = None,
     ) -> None:
         super().__init__(message)
         self.attempts = attempts
         self.agent_fallback_required = agent_fallback_required
+        self.token_usage = normalize_token_usage(token_usage)
 
 
 def _read_windows_user_env(name: str) -> str | None:
@@ -311,6 +327,8 @@ def build_provider_chat_completions_options(
     options: dict[str, Any] = {}
     if stream:
         options["stream"] = True
+        if normalized_route["provider_name"] in {"openai", "openrouter"}:
+            options["stream_options"] = {"include_usage": True}
     if normalized_route["provider_name"] == "deepseek":
         options["response_format"] = {"type": "json_object"}
         if max_tokens is not None:
@@ -343,6 +361,7 @@ def _read_streaming_chat_completions_response(
 ) -> dict[str, Any]:
     provider_response_id = ""
     content_parts: list[str] = []
+    token_usage_payload: dict[str, Any] | None = None
 
     while True:
         try:
@@ -378,6 +397,10 @@ def _read_streaming_chat_completions_response(
             if isinstance(response_id, str) and response_id.strip():
                 provider_response_id = response_id.strip()
 
+        usage_payload = event_payload.get("usage")
+        if isinstance(usage_payload, dict):
+            token_usage_payload = usage_payload
+
         choices = event_payload.get("choices")
         if not isinstance(choices, list) or not choices:
             continue
@@ -393,7 +416,7 @@ def _read_streaming_chat_completions_response(
     if not output_text:
         raise LlmResponseError("流式 chat/completions 响应里没有可用内容。")
 
-    return {
+    response_payload = {
         "id": provider_response_id,
         "choices": [
             {
@@ -403,6 +426,9 @@ def _read_streaming_chat_completions_response(
             }
         ],
     }
+    if token_usage_payload is not None:
+        response_payload["usage"] = token_usage_payload
+    return response_payload
 
 
 def _is_event_stream_response(response: Any) -> bool:
@@ -726,12 +752,16 @@ def build_llm_idea_pack_from_route(
         timeout_seconds=normalized_route["timeout_seconds"],
         extra_headers=extra_headers,
     )
+    token_usage = extract_token_usage_from_response(response_payload)
 
     if normalized_route["api_mode"] == "responses":
         output_text = extract_responses_output_text(response_payload)
     else:
         output_text = extract_chat_output_text(response_payload)
-    output_payload = parse_idea_pack_output(output_text)
+    try:
+        output_payload = parse_idea_pack_output(output_text)
+    except LlmResponseError as exc:
+        raise LlmResponseError(str(exc), token_usage=token_usage) from exc
 
     return {
         "source_mode": card_context["source_mode"],
@@ -752,6 +782,7 @@ def build_llm_idea_pack_from_route(
             "types": card_context["source_types"],
             "main_tags": card_context["source_main_tags"],
         },
+        "token_usage": token_usage,
     }
 
 
@@ -779,6 +810,7 @@ def build_llm_idea_pack_with_fallbacks(
         raise LlmConfigError("agent_fallback 必须是布尔值。")
 
     attempts: list[dict[str, Any]] = []
+    total_token_usage = build_empty_token_usage()
     for index, route in enumerate(routes, start=1):
         route_snapshot = describe_route(route)
         try:
@@ -788,17 +820,23 @@ def build_llm_idea_pack_with_fallbacks(
                 route=route,
                 transport=transport,
             )
+            current_token_usage = pack.get("token_usage", {})
+            total_token_usage = merge_token_usages(total_token_usage, current_token_usage)
             success_attempt = {
                 "attempt_index": index,
                 **route_snapshot,
                 "status": "success",
+                "token_usage": normalize_token_usage(current_token_usage),
             }
             all_attempts = [*attempts, success_attempt]
             pack["attempt_count"] = len(all_attempts)
             pack["fallback_used"] = len(attempts) > 0
             pack["attempts"] = all_attempts
+            pack["token_usage"] = total_token_usage
             return pack
         except (LlmConfigError, LlmTransportError, LlmResponseError) as exc:
+            current_token_usage = getattr(exc, "token_usage", {})
+            total_token_usage = merge_token_usages(total_token_usage, current_token_usage)
             attempts.append(
                 {
                     "attempt_index": index,
@@ -806,6 +844,7 @@ def build_llm_idea_pack_with_fallbacks(
                     "status": "failed",
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
+                    "token_usage": normalize_token_usage(current_token_usage),
                 }
             )
 
@@ -816,6 +855,7 @@ def build_llm_idea_pack_with_fallbacks(
         message,
         attempts=attempts,
         agent_fallback_required=agent_fallback,
+        token_usage=total_token_usage,
     )
 
 

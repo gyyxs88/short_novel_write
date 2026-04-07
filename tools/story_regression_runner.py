@@ -18,10 +18,15 @@ from tools.story_regression_samples import (
     get_sample_set_names,
     select_builtin_samples,
 )
+from tools.story_token_usage import (
+    build_empty_token_usage,
+    has_token_usage,
+    merge_token_usages,
+    normalize_token_usage,
+)
 
 
 DEFAULT_OUTPUT_ROOT = ROOT_DIR / "outputs" / "regression"
-DEFAULT_LLM_CONFIG_PATH = ROOT_DIR / "outputs" / "idea_pipeline" / "llm_config.json"
 SUMMARY_CHAR_RANGE = [50, 120]
 RECOMMENDATION_PRIORITY = {
     "priority_select": 3,
@@ -74,12 +79,16 @@ def summarize_action_data(action: str, data: dict[str, Any]) -> dict[str, Any]:
             "existing_card_count": data.get("existing_card_count"),
         }
     if action in {"build_idea_packs", "build_story_plans", "build_story_payloads", "build_story_drafts"}:
-        return {
+        summary = {
             "generation_mode": data.get("generation_mode", ""),
             "created_count": data.get("created_count"),
             "existing_count": data.get("existing_count"),
             "item_count": len(data.get("items", [])),
         }
+        token_usage = normalize_token_usage(data.get("token_usage", {}))
+        if has_token_usage(token_usage):
+            summary["token_usage"] = token_usage
+        return summary
     if action == "evaluate_idea_packs":
         return {
             "created_count": data.get("created_count"),
@@ -188,6 +197,26 @@ def make_stage_result(
     return stage_result
 
 
+def extract_stage_token_usage(stage_result: dict[str, Any]) -> dict[str, int]:
+    summary = stage_result.get("summary", {})
+    if isinstance(summary, dict) and "token_usage" in summary:
+        return normalize_token_usage(summary.get("token_usage"))
+    error = stage_result.get("error", {})
+    if not isinstance(error, dict):
+        return build_empty_token_usage()
+    details = error.get("details", {})
+    if not isinstance(details, dict):
+        return build_empty_token_usage()
+    return normalize_token_usage(details.get("token_usage", {}))
+
+
+def summarize_case_token_usage(stages: list[dict[str, Any]]) -> dict[str, int]:
+    total = build_empty_token_usage()
+    for stage in stages:
+        total = merge_token_usages(total, extract_stage_token_usage(stage))
+    return total
+
+
 def call_action(
     *,
     stage: str,
@@ -268,7 +297,6 @@ def run_single_sample(
     *,
     sample: RegressionSample,
     db_path: Path,
-    llm_config_path: Path,
     invoke_action: ActionInvoker,
 ) -> dict[str, Any]:
     stages: list[dict[str, Any]] = []
@@ -293,11 +321,11 @@ def run_single_sample(
         "selected_payload": {},
         "selected_draft": {},
         "inspect": {},
+        "token_usage": build_empty_token_usage(),
         "stages": stages,
     }
     shared_payload = {
         "db_path": str(db_path),
-        "llm_config_path": str(llm_config_path),
     }
 
     def fail(stage_result: dict[str, Any]) -> dict[str, Any]:
@@ -305,6 +333,7 @@ def run_single_sample(
         sample_result["status"] = "failed"
         sample_result["final_stage"] = stage_result["stage"]
         sample_result["failure_type"] = stage_result["error"].get("failure_type", "other")
+        sample_result["token_usage"] = summarize_case_token_usage(stages)
         return sample_result
 
     match_stage, matched_data = call_action(
@@ -581,6 +610,7 @@ def run_single_sample(
         "body_chars": inspect_data.get("structure", {}).get("body_chars"),
         "issues": inspect_data.get("structure", {}).get("issues", []) + inspect_data.get("quality", {}).get("issues", []),
     }
+    sample_result["token_usage"] = summarize_case_token_usage(stages)
     sample_result["status"] = "passed"
     sample_result["final_stage"] = "inspect"
     return sample_result
@@ -614,6 +644,9 @@ def build_count_map(cases: list[dict[str, Any]], field_name: str) -> dict[str, i
 def build_report_summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
     passed_count = sum(1 for case in cases if case["status"] == "passed")
     failed_count = len(cases) - passed_count
+    total_token_usage = build_empty_token_usage()
+    for case in cases:
+        total_token_usage = merge_token_usages(total_token_usage, case.get("token_usage", {}))
     return {
         "sample_count": len(cases),
         "passed_count": passed_count,
@@ -623,6 +656,7 @@ def build_report_summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
         "stage_failure_counts": build_count_map(cases, "final_stage"),
         "failure_type_counts": build_count_map(cases, "failure_type"),
         "all_passed": failed_count == 0,
+        "token_usage": total_token_usage,
     }
 
 
@@ -633,12 +667,15 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         f"- 生成时间：{report['generated_at']}",
         f"- 运行目录：`{report['run_dir']}`",
         f"- 数据库：`{report['db_path']}`",
-        f"- LLM 配置：`{report['llm_config_path']}`",
+        "- LLM 配置：`与本次数据库同库存储`",
         f"- 样本集合：`{report['sample_set']}`",
         f"- 样本数量：`{report['summary']['sample_count']}`",
         f"- 通过数量：`{report['summary']['passed_count']}`",
         f"- 失败数量：`{report['summary']['failed_count']}`",
         f"- inspect 通过率：`{report['summary']['inspect_pass_rate']}`",
+        f"- prompt tokens：`{report['summary']['token_usage']['prompt_tokens']}`",
+        f"- completion tokens：`{report['summary']['token_usage']['completion_tokens']}`",
+        f"- total tokens：`{report['summary']['token_usage']['total_tokens']}`",
         "",
         "## 风格汇总",
         "",
@@ -671,6 +708,7 @@ def render_markdown_report(report: dict[str, Any]) -> str:
                 f"- 选中方案：`{case['selected_plan']}`",
                 f"- 选中 payload：`{case['selected_payload']}`",
                 f"- 选中草稿：`{case['selected_draft']}`",
+                f"- tokens：`{case.get('token_usage', build_empty_token_usage())}`",
             ]
         )
         if case["inspect"]:
@@ -710,7 +748,6 @@ def run_regression(
     *,
     samples: list[RegressionSample],
     output_root: Path,
-    llm_config_path: Path,
     run_name: str | None = None,
     sample_set: str = "custom",
     invoke_action: ActionInvoker = invoke_story_action,
@@ -727,7 +764,6 @@ def run_regression(
         run_single_sample(
             sample=sample,
             db_path=db_path,
-            llm_config_path=llm_config_path,
             invoke_action=invoke_action,
         )
         for sample in samples
@@ -737,7 +773,6 @@ def run_regression(
         "sample_set": sample_set,
         "run_dir": str(run_dir),
         "db_path": str(db_path),
-        "llm_config_path": str(llm_config_path),
         "cases": cases,
         "summary": build_report_summary(cases),
     }
@@ -752,7 +787,6 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--styles", default="", help="只运行指定风格，逗号分隔，可选 zhihu,douban。")
     parser.add_argument("--include-disabled", action="store_true", help="包含 disabled 样本。")
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT), help="报告输出根目录。")
-    parser.add_argument("--llm-config-path", default=str(DEFAULT_LLM_CONFIG_PATH), help="LLM 配置文件路径。")
     parser.add_argument("--run-name", default="", help="本次运行目录名；不传则自动按时间生成。")
     parser.add_argument("--fail-on-sample-failure", action="store_true", help="只要有样本失败就返回退出码 1。")
     return parser
@@ -773,7 +807,6 @@ def main(argv: list[str] | None = None) -> int:
         report = run_regression(
             samples=samples,
             output_root=Path(args.output_root),
-            llm_config_path=Path(args.llm_config_path),
             run_name=args.run_name,
             sample_set=args.sample_set,
         )

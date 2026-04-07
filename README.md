@@ -33,17 +33,21 @@
 9. 创意包评测与筛选基线
    通过 `tools/story_idea_pack_evaluator.py` 对创意包做 deterministic 评分、推荐和持久化，支撑筛选闭环。
 10. LLM 配置与环境链路
-   通过 `tools/story_llm_config.py` 管理供应商、模型配置和调用环境，支持同一环境挂多模型候选链路，前一个失败自动切下一个。
+   通过 `tools/story_llm_config.py` 在同一个 `story_ideas.sqlite3` 里管理供应商、模型配置和调用环境，支持同一环境挂多模型候选链路，前一个失败自动切下一个。
 11. 故事方案生成与写作简报落库
    通过 `tools/story_plan_builder.py` 和 `tools/story_plan_llm_builder.py` 生成 `3-4` 组完整故事方案，覆盖标题、题材氛围、卖点、主角目标、关键转折、结尾方向、章节节奏和可直接下传正文阶段的 `writing_brief`。
 12. 正文 payload 与正文草稿生成
    通过 `tools/story_payload_builder.py`、`tools/story_draft_builder.py` 和 `tools/story_draft_llm_builder.py` 把 `writing_brief` 收口成稳定 `story_payload`，并生成可直接接 `inspect/save` 的完整 Markdown 草稿。
-13. 统一 CLI
-   通过 `tools/story_cli.py` 统一对外暴露 `generate_ideas`、`match_idea_cards`、`store_idea_cards`、`build_idea_packs`、`evaluate_idea_packs`、`build_story_plans`、`build_story_payloads`、`build_story_drafts`、`get_llm_config`、`upsert_llm_provider`、`upsert_llm_model`、`upsert_llm_environment`、`list_idea_cards`、`list_idea_packs`、`list_idea_pack_evaluations`、`list_story_plans`、`list_story_payloads`、`list_story_drafts`、`update_idea_pack_status`、`update_story_plan_status`、`update_story_draft_status`、`save`、`check_structure`、`check_quality`、`inspect` 二十五个动作。
-14. Skill 调用约定
+13. 任务运行库归档
+   通过 `tools/story_archive_manager.py` 把单次任务目录里的 `story_ideas.sqlite3` 与 `report.json` 归档进统一 `archive.sqlite3`，保留选题链路、成品正文、阶段耗时与 token 统计，并支持归档校验通过后删除源业务库。
+14. 批量任务并发调度
+   通过 `tools/story_batch_runner.py` 从 jobs JSON 批量创建独立运行库，并发跑单 job 写作链，再用单线程归档 worker 串行写入 `archive.sqlite3`，适合多小说同时生成。
+15. 统一 CLI
+   通过 `tools/story_cli.py` 统一对外暴露 `generate_ideas`、`match_idea_cards`、`store_idea_cards`、`build_idea_packs`、`evaluate_idea_packs`、`build_story_plans`、`build_story_payloads`、`build_story_drafts`、`get_llm_config`、`export_llm_config`、`apply_llm_config`、`list_llm_providers`、`list_llm_models`、`list_llm_environments`、`get_llm_provider`、`get_llm_model`、`get_llm_environment`、`upsert_llm_provider`、`upsert_llm_model`、`upsert_llm_environment`、`delete_llm_provider`、`delete_llm_model`、`delete_llm_environment`、`list_idea_cards`、`list_idea_packs`、`list_idea_pack_evaluations`、`list_story_plans`、`list_story_payloads`、`list_story_drafts`、`update_idea_pack_status`、`update_story_plan_status`、`update_story_draft_status`、`archive_run`、`save`、`check_structure`、`check_quality`、`inspect` 三十七个动作。
+16. Skill 调用约定
    `SKILL.md`、`references/workflow.md`、`references/quality-checklist.md` 已经接入 CLI 的收尾调用链。
-15. 真实样本回归与报告
-   通过 `tools/story_regression_runner.py` 和 `tools/story_regression_samples.py` 批量跑真实样本链路，输出 JSON/Markdown 回归报告，统计阶段失败点和失败类型。
+17. 真实样本回归与报告
+   通过 `tools/story_regression_runner.py` 和 `tools/story_regression_samples.py` 批量跑真实样本链路，输出 JSON/Markdown 回归报告，统计阶段失败点、失败类型以及各阶段 token 消耗。
 
 重要说明：
 
@@ -53,15 +57,22 @@
 - `generation_mode="llm"` 下默认优先走兼容 `chat/completions` 的接口，更适合第三方中转和兼容供应商
 - 当前 LLM 层已支持“环境 -> 候选模型链路”的配置方式
 - 同一 `llm_environment` 可以挂多个候选模型，前一个失败会自动试下一个
+- 写作任务在使用 `llm_environment` 时，可以临时传 `llm_model_keys_override` 重排本次调用的模型优先级，不会改动 SQLite 里的默认顺序
 - 同一条写作链的不同阶段可以使用不同 `llm_environment`
 - 当前默认字数档位已按风格拆开：
   - `zhihu` 默认 `10000-30000` 字
   - `douban` 默认 `10000-20000` 字
 - 对长输出链路，尤其是豆瓣风格，建议把 `build_story_plans` 和 `build_story_drafts` 拆到不同环境，不要默认共用同一套 timeout
 - `build_story_plans` 和 `build_story_drafts` 在 `chat/completions` 长输出阶段默认启用 `stream=true`
+- LLM 生成链路现在会尽量提取并落库标准化 token 统计：`prompt_tokens`、`completion_tokens`、`total_tokens`
+- `build_idea_packs`、`build_story_plans`、`build_story_drafts` 的 CLI 返回值里会带本次动作的 `token_usage`
+- `list_idea_packs`、`list_story_plans`、`list_story_drafts` 现在会返回对应记录保存下来的 `token_usage`
 - 这两个长输出阶段的 `timeout_seconds` 按“连续多久没收到新的流式数据块”计算，不按整包返回时长计算
 - 当目标字数进入长稿档位时，`build_story_drafts` 会默认切到“先生成 summary，再逐章生成正文，最后拼稿”的分段模式，不再尝试单次整篇输出
-- 分段正文的单章预算现在按风格保留弹性浮动，不再按平均字数做过硬上限；如果只是小幅超长，会保留原文直接放行，不再本地裁剪
+- 分段正文的单章预算现在按风格保留弹性浮动，不再按平均字数做过硬上限；只要简介合格且整稿达到目标下限，正文和单章即使超长也默认放行，不再因超过目标上限而失败
+- 当前推荐的数据分层是：`template.sqlite3` 只放稳定配置，单次任务使用独立运行库，任务结束后再把业务数据写入统一 `archive.sqlite3`
+- `archive_run` 归档时会把选题链路、最终成品、阶段耗时和 token 统计一起落库；只有归档校验通过后才建议删除任务运行库
+- `story_batch_runner.py` 当前就是这套分层的批量执行入口：每个 job 独立运行库，并发生成，归档串行收口
 - 如果整个候选链路都失败，CLI 会返回 `AGENT_FALLBACK_REQUIRED`，交给 agent 做最后兜底
 - 当前已新增 deterministic 创意包评测层，可对已有创意包做打分、推荐和排序
 - 当前已新增完整方案层，可基于创意包生成 deterministic / llm 两种故事方案，并把写作简报一并落到 SQLite
@@ -110,6 +121,8 @@ short_novel_write/
 │  ├─ story_idea_prompt_matcher.py
 │  ├─ story_idea_repository.py
 │  ├─ story_idea_seed_generator.py
+│  ├─ story_archive_manager.py
+│  ├─ story_batch_runner.py
 │  ├─ story_llm_config.py
 │  ├─ story_output_writer.py
 │  ├─ story_payload_builder.py
@@ -124,7 +137,10 @@ short_novel_write/
 ├─ tests/
 │  └─ tools/
 │     ├─ test_story_cli.py
+│     ├─ test_story_cli_archive.py
 │     ├─ test_story_cli_idea_pipeline.py
+│     ├─ test_story_archive_manager.py
+│     ├─ test_story_batch_runner.py
 │     ├─ test_story_idea_pack_builder.py
 │     ├─ test_story_idea_pack_llm_builder.py
 │     ├─ test_story_idea_prompt_matcher.py
@@ -236,9 +252,20 @@ chcp 65001 > $null
 - `build_story_payloads`
 - `build_story_drafts`
 - `get_llm_config`
+- `export_llm_config`
+- `apply_llm_config`
+- `list_llm_providers`
+- `list_llm_models`
+- `list_llm_environments`
+- `get_llm_provider`
+- `get_llm_model`
+- `get_llm_environment`
 - `upsert_llm_provider`
 - `upsert_llm_model`
 - `upsert_llm_environment`
+- `delete_llm_provider`
+- `delete_llm_model`
+- `delete_llm_environment`
 - `list_idea_cards`
 - `list_idea_packs`
 - `list_idea_pack_evaluations`
@@ -270,9 +297,9 @@ chcp 65001 > $null
 - `story_payloads`
 - `story_drafts`
 
-默认 LLM 配置路径：
+默认 LLM 配置也存放在同一个 SQLite 里：
 
-- `outputs/idea_pipeline/llm_config.json`
+- `outputs/idea_pipeline/story_ideas.sqlite3`
 
 ### 标准请求格式
 
@@ -380,7 +407,7 @@ $env:OPENROUTER_API_KEY = "你的 OpenRouter Key"
 
 ```powershell
 @'
-{"action":"upsert_llm_provider","payload":{"provider_name":"openrouter","api_key_env":"OPENROUTER_API_KEY","chat_completions_url":"https://openrouter.ai/api/v1/chat/completions","extra_headers":{"HTTP-Referer":"OPENROUTER_HTTP_REFERER","X-Title":"OPENROUTER_X_TITLE"}}}
+{"action":"upsert_llm_provider","payload":{"db_path":"outputs/idea_pipeline/story_ideas.sqlite3","provider_name":"openrouter","api_key_env":"OPENROUTER_API_KEY","chat_completions_url":"https://openrouter.ai/api/v1/chat/completions","extra_headers":{"HTTP-Referer":"OPENROUTER_HTTP_REFERER","X-Title":"OPENROUTER_X_TITLE"}}}
 '@ | .\.venv\Scripts\python.exe tools\story_cli.py
 ```
 
@@ -388,7 +415,7 @@ $env:OPENROUTER_API_KEY = "你的 OpenRouter Key"
 
 ```powershell
 @'
-{"action":"upsert_llm_model","payload":{"model_key":"openrouter_qwen_free","provider_name":"openrouter","model_name":"qwen/qwen3.6-plus:free","api_mode":"chat_completions","timeout_seconds":60}}
+{"action":"upsert_llm_model","payload":{"db_path":"outputs/idea_pipeline/story_ideas.sqlite3","model_key":"openrouter_qwen_free","provider_name":"openrouter","model_name":"qwen/qwen3.6-plus:free","api_mode":"chat_completions","timeout_seconds":60}}
 '@ | .\.venv\Scripts\python.exe tools\story_cli.py
 ```
 
@@ -396,7 +423,7 @@ $env:OPENROUTER_API_KEY = "你的 OpenRouter Key"
 
 ```powershell
 @'
-{"action":"upsert_llm_environment","payload":{"environment_name":"idea_pack_default","model_keys":["openrouter_qwen_free"],"agent_fallback":true,"description":"创意包默认环境"}}
+{"action":"upsert_llm_environment","payload":{"db_path":"outputs/idea_pipeline/story_ideas.sqlite3","environment_name":"idea_pack_default","model_keys":["openrouter_qwen_free"],"agent_fallback":true,"description":"创意包默认环境"}}
 '@ | .\.venv\Scripts\python.exe tools\story_cli.py
 ```
 
@@ -404,7 +431,79 @@ $env:OPENROUTER_API_KEY = "你的 OpenRouter Key"
 
 ```powershell
 @'
-{"action":"get_llm_config","payload":{}}
+{"action":"get_llm_config","payload":{"db_path":"outputs/idea_pipeline/story_ideas.sqlite3"}}
+'@ | .\.venv\Scripts\python.exe tools\story_cli.py
+```
+
+导出完整快照：
+
+```powershell
+@'
+{"action":"export_llm_config","payload":{"db_path":"outputs/idea_pipeline/story_ideas.sqlite3"}}
+'@ | .\.venv\Scripts\python.exe tools\story_cli.py
+```
+
+把导出的快照整体应用到另一个 SQLite：
+
+```powershell
+@'
+{"action":"apply_llm_config","payload":{"db_path":"outputs/idea_pipeline/another_story_ideas.sqlite3","snapshot":{"format_version":1,"config":{"providers":{},"models":{},"environments":{}}}}}
+'@ | .\.venv\Scripts\python.exe tools\story_cli.py
+```
+
+只看供应商列表：
+
+```powershell
+@'
+{"action":"list_llm_providers","payload":{"db_path":"outputs/idea_pipeline/story_ideas.sqlite3"}}
+'@ | .\.venv\Scripts\python.exe tools\story_cli.py
+```
+
+只看模型列表：
+
+```powershell
+@'
+{"action":"list_llm_models","payload":{"db_path":"outputs/idea_pipeline/story_ideas.sqlite3"}}
+'@ | .\.venv\Scripts\python.exe tools\story_cli.py
+```
+
+只看环境列表：
+
+```powershell
+@'
+{"action":"list_llm_environments","payload":{"db_path":"outputs/idea_pipeline/story_ideas.sqlite3"}}
+'@ | .\.venv\Scripts\python.exe tools\story_cli.py
+```
+
+查看单个环境：
+
+```powershell
+@'
+{"action":"get_llm_environment","payload":{"db_path":"outputs/idea_pipeline/story_ideas.sqlite3","environment_name":"idea_pack_default"}}
+'@ | .\.venv\Scripts\python.exe tools\story_cli.py
+```
+
+删除环境：
+
+```powershell
+@'
+{"action":"delete_llm_environment","payload":{"db_path":"outputs/idea_pipeline/story_ideas.sqlite3","environment_name":"idea_pack_default"}}
+'@ | .\.venv\Scripts\python.exe tools\story_cli.py
+```
+
+删除模型：
+
+```powershell
+@'
+{"action":"delete_llm_model","payload":{"db_path":"outputs/idea_pipeline/story_ideas.sqlite3","model_key":"openrouter_qwen_free"}}
+'@ | .\.venv\Scripts\python.exe tools\story_cli.py
+```
+
+删除供应商：
+
+```powershell
+@'
+{"action":"delete_llm_provider","payload":{"db_path":"outputs/idea_pipeline/story_ideas.sqlite3","provider_name":"openrouter"}}
 '@ | .\.venv\Scripts\python.exe tools\story_cli.py
 ```
 
@@ -416,9 +515,24 @@ $env:OPENROUTER_API_KEY = "你的 OpenRouter Key"
 '@ | .\.venv\Scripts\python.exe tools\story_cli.py
 ```
 
+如果你想只在这一次调用里临时改模型优先级，不改 SQLite 默认环境，可以这样传：
+
+```powershell
+@'
+{"action":"build_idea_packs","payload":{"batch_id":1,"style":"zhihu","generation_mode":"llm","llm_environment":"idea_pack_default","llm_model_keys_override":["openrouter_qwen_free_backup","openrouter_qwen_free"]}}
+'@ | .\.venv\Scripts\python.exe tools\story_cli.py
+```
+
 补充说明：
 
 - `llm_environment` 用来选调用环境
+- LLM 配置和创意/方案/正文产物现在统一落在同一个 `db_path` 对应的 SQLite 里，不再单独使用 `llm_config.json`
+- `export_llm_config` 适合 agent 先导出快照、修改 JSON、再用 `apply_llm_config` 整体回写
+- `apply_llm_config` 会按快照整体替换当前库里的 LLM 配置，不是局部 merge
+- `llm_model_keys_override` 只影响当前这次 `build_idea_packs / build_story_plans / build_story_drafts` 调用，不会改写环境默认顺序
+- `llm_model_keys_override` 只能填写当前环境已经绑定过的 `model_key`
+- 删除时有依赖约束：
+  - 先删环境，再删模型，最后删供应商
 - 每个环境可以配置多个 `model_keys`，会按顺序尝试
 - 前一个模型失败会自动切到下一个
 - `build_story_plans` 和 `build_story_drafts` 不必共用同一个 `llm_environment`

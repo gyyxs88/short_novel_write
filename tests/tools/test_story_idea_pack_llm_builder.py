@@ -59,6 +59,7 @@ def test_build_llm_idea_pack_supports_chat_completions_provider() -> None:
                     }
                 }
             ],
+            "usage": {"prompt_tokens": 123, "completion_tokens": 45, "total_tokens": 168},
         }
 
     pack = build_llm_idea_pack(
@@ -77,6 +78,7 @@ def test_build_llm_idea_pack_supports_chat_completions_provider() -> None:
     assert pack["style"] == "zhihu"
     assert pack["model_name"] == "qwen/qwen3.6-plus:free"
     assert pack["provider_response_id"] == "chatcmpl_123"
+    assert pack["token_usage"] == {"prompt_tokens": 123, "completion_tokens": 45, "total_tokens": 168}
     assert pack["hook"] == "她在葬礼结束后收到失踪初恋发来的求救短信。"
 
     payload = captured["payload"]
@@ -97,6 +99,7 @@ def test_build_llm_idea_pack_supports_responses_mode() -> None:
     ) -> dict:
         return {
             "id": "resp_123",
+            "usage": {"input_tokens": 88, "output_tokens": 22, "total_tokens": 110},
             "output": [
                 {
                     "type": "message",
@@ -133,6 +136,7 @@ def test_build_llm_idea_pack_supports_responses_mode() -> None:
     assert pack["provider_name"] == "openai"
     assert pack["api_mode"] == "responses"
     assert pack["provider_response_id"] == "resp_123"
+    assert pack["token_usage"] == {"prompt_tokens": 88, "completion_tokens": 22, "total_tokens": 110}
 
 
 def test_build_llm_idea_pack_supports_deepseek_json_mode() -> None:
@@ -304,7 +308,11 @@ def test_post_json_api_falls_back_to_plain_json_when_stream_response_is_not_sse(
     assert response["choices"][0]["message"]["content"] == '{"hook":"普通 JSON 回退"}'
 
 
-def test_build_llm_idea_pack_requires_api_key() -> None:
+def test_build_llm_idea_pack_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(llm_builder, "_read_windows_user_env", lambda name: None)
     with pytest.raises(LlmConfigError, match="API Key"):
         build_llm_idea_pack(
             card=CARD,

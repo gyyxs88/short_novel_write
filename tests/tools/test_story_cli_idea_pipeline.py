@@ -453,9 +453,279 @@ def test_build_idea_packs_action_supports_llm_generation_mode(tmp_path: Path) ->
     assert handler.last_request["model"] == "qwen/qwen3.6-plus:free"
 
 
+def test_llm_config_delete_actions_work_with_cli(tmp_path: Path) -> None:
+    db_path = tmp_path / "story_ideas.sqlite3"
+    parse_stdout_json(
+        run_cli(
+            {
+                "action": "upsert_llm_provider",
+                "payload": {
+                    "db_path": str(db_path),
+                    "provider_name": "openrouter",
+                    "api_key_env": "OPENROUTER_API_KEY",
+                    "chat_completions_url": "https://openrouter.ai/api/v1/chat/completions",
+                },
+            }
+        )
+    )
+    parse_stdout_json(
+        run_cli(
+            {
+                "action": "upsert_llm_model",
+                "payload": {
+                    "db_path": str(db_path),
+                    "model_key": "openrouter_free_qwen",
+                    "provider_name": "openrouter",
+                    "model_name": "qwen/qwen3.6-plus:free",
+                    "api_mode": "chat_completions",
+                },
+            }
+        )
+    )
+    parse_stdout_json(
+        run_cli(
+            {
+                "action": "upsert_llm_environment",
+                "payload": {
+                    "db_path": str(db_path),
+                    "environment_name": "idea_pack_default",
+                    "model_keys": ["openrouter_free_qwen"],
+                    "agent_fallback": True,
+                },
+            }
+        )
+    )
+
+    deleted_environment = parse_stdout_json(
+        run_cli(
+            {
+                "action": "delete_llm_environment",
+                "payload": {
+                    "db_path": str(db_path),
+                    "environment_name": "idea_pack_default",
+                },
+            }
+        )
+    )
+    deleted_model = parse_stdout_json(
+        run_cli(
+            {
+                "action": "delete_llm_model",
+                "payload": {
+                    "db_path": str(db_path),
+                    "model_key": "openrouter_free_qwen",
+                },
+            }
+        )
+    )
+    deleted_provider = parse_stdout_json(
+        run_cli(
+            {
+                "action": "delete_llm_provider",
+                "payload": {
+                    "db_path": str(db_path),
+                    "provider_name": "openrouter",
+                },
+            }
+        )
+    )
+    config = parse_stdout_json(
+        run_cli(
+            {
+                "action": "get_llm_config",
+                "payload": {
+                    "db_path": str(db_path),
+                },
+            }
+        )
+    )
+
+    assert deleted_environment["ok"] is True
+    assert deleted_environment["data"]["environment"]["environment_name"] == "idea_pack_default"
+    assert deleted_model["ok"] is True
+    assert deleted_model["data"]["model"]["model_key"] == "openrouter_free_qwen"
+    assert deleted_provider["ok"] is True
+    assert deleted_provider["data"]["provider"]["provider_name"] == "openrouter"
+    assert config["data"] == {
+        "providers": {},
+        "models": {},
+        "environments": {},
+    }
+
+
+def test_llm_config_list_and_get_actions_work_with_cli(tmp_path: Path) -> None:
+    db_path = tmp_path / "story_ideas.sqlite3"
+    parse_stdout_json(
+        run_cli(
+            {
+                "action": "upsert_llm_provider",
+                "payload": {
+                    "db_path": str(db_path),
+                    "provider_name": "openrouter",
+                    "api_key_env": "OPENROUTER_API_KEY",
+                    "chat_completions_url": "https://openrouter.ai/api/v1/chat/completions",
+                },
+            }
+        )
+    )
+    parse_stdout_json(
+        run_cli(
+            {
+                "action": "upsert_llm_model",
+                "payload": {
+                    "db_path": str(db_path),
+                    "model_key": "route_a",
+                    "provider_name": "openrouter",
+                    "model_name": "model-a",
+                    "api_mode": "chat_completions",
+                    "timeout_seconds": 45,
+                },
+            }
+        )
+    )
+    parse_stdout_json(
+        run_cli(
+            {
+                "action": "upsert_llm_environment",
+                "payload": {
+                    "db_path": str(db_path),
+                    "environment_name": "idea_pack_default",
+                    "model_keys": ["route_a"],
+                    "agent_fallback": True,
+                    "description": "创意包环境",
+                },
+            }
+        )
+    )
+
+    providers = parse_stdout_json(
+        run_cli({"action": "list_llm_providers", "payload": {"db_path": str(db_path)}})
+    )
+    models = parse_stdout_json(
+        run_cli({"action": "list_llm_models", "payload": {"db_path": str(db_path)}})
+    )
+    environments = parse_stdout_json(
+        run_cli({"action": "list_llm_environments", "payload": {"db_path": str(db_path)}})
+    )
+    provider = parse_stdout_json(
+        run_cli(
+            {
+                "action": "get_llm_provider",
+                "payload": {"db_path": str(db_path), "provider_name": "openrouter"},
+            }
+        )
+    )
+    model = parse_stdout_json(
+        run_cli(
+            {
+                "action": "get_llm_model",
+                "payload": {"db_path": str(db_path), "model_key": "route_a"},
+            }
+        )
+    )
+    environment = parse_stdout_json(
+        run_cli(
+            {
+                "action": "get_llm_environment",
+                "payload": {"db_path": str(db_path), "environment_name": "idea_pack_default"},
+            }
+        )
+    )
+
+    assert providers["data"]["count"] == 1
+    assert providers["data"]["items"][0]["provider_name"] == "openrouter"
+    assert models["data"]["count"] == 1
+    assert models["data"]["items"][0]["model_key"] == "route_a"
+    assert environments["data"]["count"] == 1
+    assert environments["data"]["items"][0]["environment_name"] == "idea_pack_default"
+    assert provider["data"]["provider_name"] == "openrouter"
+    assert model["data"]["model_key"] == "route_a"
+    assert environment["data"]["model_keys"] == ["route_a"]
+
+
+def test_llm_config_export_and_apply_actions_work_with_cli(tmp_path: Path) -> None:
+    source_db_path = tmp_path / "source.sqlite3"
+    target_db_path = tmp_path / "target.sqlite3"
+    parse_stdout_json(
+        run_cli(
+            {
+                "action": "upsert_llm_provider",
+                "payload": {
+                    "db_path": str(source_db_path),
+                    "provider_name": "openrouter",
+                    "api_key_env": "OPENROUTER_API_KEY",
+                    "chat_completions_url": "https://openrouter.ai/api/v1/chat/completions",
+                },
+            }
+        )
+    )
+    parse_stdout_json(
+        run_cli(
+            {
+                "action": "upsert_llm_model",
+                "payload": {
+                    "db_path": str(source_db_path),
+                    "model_key": "route_a",
+                    "provider_name": "openrouter",
+                    "model_name": "model-a",
+                    "api_mode": "chat_completions",
+                    "timeout_seconds": 45,
+                },
+            }
+        )
+    )
+    parse_stdout_json(
+        run_cli(
+            {
+                "action": "upsert_llm_environment",
+                "payload": {
+                    "db_path": str(source_db_path),
+                    "environment_name": "idea_pack_default",
+                    "model_keys": ["route_a"],
+                    "agent_fallback": True,
+                    "description": "创意包环境",
+                },
+            }
+        )
+    )
+
+    exported = parse_stdout_json(
+        run_cli(
+            {
+                "action": "export_llm_config",
+                "payload": {"db_path": str(source_db_path)},
+            }
+        )
+    )
+    applied = parse_stdout_json(
+        run_cli(
+            {
+                "action": "apply_llm_config",
+                "payload": {
+                    "db_path": str(target_db_path),
+                    "snapshot": exported["data"]["snapshot"],
+                },
+            }
+        )
+    )
+    target_config = parse_stdout_json(
+        run_cli(
+            {
+                "action": "get_llm_config",
+                "payload": {"db_path": str(target_db_path)},
+            }
+        )
+    )
+
+    assert exported["ok"] is True
+    assert exported["data"]["counts"] == {"providers": 1, "models": 1, "environments": 1}
+    assert applied["ok"] is True
+    assert applied["data"]["counts"] == {"providers": 1, "models": 1, "environments": 1}
+    assert target_config["data"] == exported["data"]["snapshot"]["config"]
+
+
 def test_build_idea_packs_action_supports_llm_environment_fallback(tmp_path: Path) -> None:
     db_path = tmp_path / "story_ideas.sqlite3"
-    llm_config_path = tmp_path / "llm_config.json"
     stored = parse_stdout_json(
         run_cli(
             {
@@ -480,7 +750,7 @@ def test_build_idea_packs_action_supports_llm_environment_fallback(tmp_path: Pat
             {
                 "action": "upsert_llm_provider",
                 "payload": {
-                    "llm_config_path": str(llm_config_path),
+                    "db_path": str(db_path),
                     "provider_name": "openrouter",
                     "api_key_env": "OPENROUTER_API_KEY",
                     "chat_completions_url": "https://example.com/placeholder",
@@ -493,7 +763,7 @@ def test_build_idea_packs_action_supports_llm_environment_fallback(tmp_path: Pat
             {
                 "action": "upsert_llm_model",
                 "payload": {
-                    "llm_config_path": str(llm_config_path),
+                    "db_path": str(db_path),
                     "model_key": "route_a",
                     "provider_name": "openrouter",
                     "model_name": "model-a",
@@ -507,7 +777,7 @@ def test_build_idea_packs_action_supports_llm_environment_fallback(tmp_path: Pat
             {
                 "action": "upsert_llm_model",
                 "payload": {
-                    "llm_config_path": str(llm_config_path),
+                    "db_path": str(db_path),
                     "model_key": "route_b",
                     "provider_name": "openrouter",
                     "model_name": "model-b",
@@ -521,7 +791,7 @@ def test_build_idea_packs_action_supports_llm_environment_fallback(tmp_path: Pat
             {
                 "action": "upsert_llm_environment",
                 "payload": {
-                    "llm_config_path": str(llm_config_path),
+                    "db_path": str(db_path),
                     "environment_name": "idea_pack_default",
                     "model_keys": ["route_a", "route_b"],
                     "agent_fallback": True,
@@ -563,7 +833,7 @@ def test_build_idea_packs_action_supports_llm_environment_fallback(tmp_path: Pat
                 {
                     "action": "upsert_llm_provider",
                     "payload": {
-                        "llm_config_path": str(llm_config_path),
+                        "db_path": str(db_path),
                         "provider_name": "openrouter",
                         "api_key_env": "OPENROUTER_API_KEY",
                         "chat_completions_url": api_url,
@@ -577,7 +847,6 @@ def test_build_idea_packs_action_supports_llm_environment_fallback(tmp_path: Pat
                     "action": "build_idea_packs",
                     "payload": {
                         "db_path": str(db_path),
-                        "llm_config_path": str(llm_config_path),
                         "batch_id": stored["data"]["batch_id"],
                         "style": "zhihu",
                         "generation_mode": "llm",
@@ -603,11 +872,8 @@ def test_build_idea_packs_action_supports_llm_environment_fallback(tmp_path: Pat
     assert handler.last_request["model"] == "model-b"
 
 
-def test_build_idea_packs_action_returns_agent_fallback_required_when_environment_exhausted(
-    tmp_path: Path,
-) -> None:
+def test_build_idea_packs_action_supports_temporary_llm_model_priority_override(tmp_path: Path) -> None:
     db_path = tmp_path / "story_ideas.sqlite3"
-    llm_config_path = tmp_path / "llm_config.json"
     stored = parse_stdout_json(
         run_cli(
             {
@@ -631,7 +897,7 @@ def test_build_idea_packs_action_returns_agent_fallback_required_when_environmen
             {
                 "action": "upsert_llm_provider",
                 "payload": {
-                    "llm_config_path": str(llm_config_path),
+                    "db_path": str(db_path),
                     "provider_name": "openrouter",
                     "api_key_env": "OPENROUTER_API_KEY",
                     "chat_completions_url": "https://example.com/placeholder",
@@ -644,7 +910,145 @@ def test_build_idea_packs_action_returns_agent_fallback_required_when_environmen
             {
                 "action": "upsert_llm_model",
                 "payload": {
-                    "llm_config_path": str(llm_config_path),
+                    "db_path": str(db_path),
+                    "model_key": "route_a",
+                    "provider_name": "openrouter",
+                    "model_name": "model-a",
+                    "api_mode": "chat_completions",
+                },
+            }
+        )
+    )
+    parse_stdout_json(
+        run_cli(
+            {
+                "action": "upsert_llm_model",
+                "payload": {
+                    "db_path": str(db_path),
+                    "model_key": "route_b",
+                    "provider_name": "openrouter",
+                    "model_name": "model-b",
+                    "api_mode": "chat_completions",
+                },
+            }
+        )
+    )
+    parse_stdout_json(
+        run_cli(
+            {
+                "action": "upsert_llm_environment",
+                "payload": {
+                    "db_path": str(db_path),
+                    "environment_name": "idea_pack_default",
+                    "model_keys": ["route_a", "route_b"],
+                    "agent_fallback": True,
+                },
+            }
+        )
+    )
+
+    response_payload = {
+        "id": "chatcmpl_env_override_123",
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "style_reason": "本次优先改用第二模型。",
+                            "hook": "她在葬礼结束后收到失踪初恋发来的求救短信。",
+                            "core_relationship": "女主与失踪初恋被旧案重新绑回同一条线上。",
+                            "main_conflict": "她越想查清失踪真相，越不得不承认自己才是旧案的关键证人。",
+                            "reversal_direction": "求救的人未必真是受害者，真正被盯上的也许一直是女主。",
+                            "recommended_tags": ["悬疑 / 推理", "失踪", "初恋"],
+                        },
+                        ensure_ascii=False,
+                    )
+                }
+            }
+        ],
+    }
+
+    with serve_mock_responses_api(response_payload) as (api_url, handler):
+        parse_stdout_json(
+            run_cli(
+                {
+                    "action": "upsert_llm_provider",
+                    "payload": {
+                        "db_path": str(db_path),
+                        "provider_name": "openrouter",
+                        "api_key_env": "OPENROUTER_API_KEY",
+                        "chat_completions_url": api_url,
+                    },
+                }
+            )
+        )
+        built = parse_stdout_json(
+            run_cli(
+                {
+                    "action": "build_idea_packs",
+                    "payload": {
+                        "db_path": str(db_path),
+                        "batch_id": stored["data"]["batch_id"],
+                        "style": "zhihu",
+                        "generation_mode": "llm",
+                        "llm_environment": "idea_pack_default",
+                        "llm_model_keys_override": ["route_b", "route_a"],
+                    },
+                },
+                env_overrides={"OPENROUTER_API_KEY": "test-key"},
+            )
+        )
+
+    assert built["ok"] is True
+    assert built["data"]["llm_environment"] == "idea_pack_default"
+    assert built["data"]["llm_model_keys_override"] == ["route_b", "route_a"]
+    assert built["data"]["effective_llm_model_keys"] == ["route_b", "route_a"]
+    assert built["data"]["used_model_config_keys"] == ["route_b"]
+    assert handler.last_request is not None
+    assert handler.last_request["model"] == "model-b"
+
+
+def test_build_idea_packs_action_returns_agent_fallback_required_when_environment_exhausted(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "story_ideas.sqlite3"
+    stored = parse_stdout_json(
+        run_cli(
+            {
+                "action": "store_idea_cards",
+                "payload": {
+                    "db_path": str(db_path),
+                    "source_mode": "seed_generate",
+                    "seed": "seed-a",
+                    "items": [
+                        {
+                            "types": ["Mystery - 悬疑 / 推理", "Modern - 现代"],
+                            "main_tags": ["Missing Person - 失踪", "First Love - 初恋", "Secret Past - 隐秘过去"],
+                        }
+                    ],
+                },
+            }
+        )
+    )
+    parse_stdout_json(
+        run_cli(
+            {
+                "action": "upsert_llm_provider",
+                "payload": {
+                    "db_path": str(db_path),
+                    "provider_name": "openrouter",
+                    "api_key_env": "OPENROUTER_API_KEY",
+                    "chat_completions_url": "https://example.com/placeholder",
+                },
+            }
+        )
+    )
+    parse_stdout_json(
+        run_cli(
+            {
+                "action": "upsert_llm_model",
+                "payload": {
+                    "db_path": str(db_path),
                     "model_key": "route_a",
                     "provider_name": "openrouter",
                     "model_name": "model-a",
@@ -658,7 +1062,7 @@ def test_build_idea_packs_action_returns_agent_fallback_required_when_environmen
             {
                 "action": "upsert_llm_environment",
                 "payload": {
-                    "llm_config_path": str(llm_config_path),
+                    "db_path": str(db_path),
                     "environment_name": "idea_pack_default",
                     "model_keys": ["route_a"],
                     "agent_fallback": True,
@@ -679,7 +1083,7 @@ def test_build_idea_packs_action_returns_agent_fallback_required_when_environmen
                 {
                     "action": "upsert_llm_provider",
                     "payload": {
-                        "llm_config_path": str(llm_config_path),
+                        "db_path": str(db_path),
                         "provider_name": "openrouter",
                         "api_key_env": "OPENROUTER_API_KEY",
                         "chat_completions_url": api_url,
@@ -692,7 +1096,6 @@ def test_build_idea_packs_action_returns_agent_fallback_required_when_environmen
                 "action": "build_idea_packs",
                 "payload": {
                     "db_path": str(db_path),
-                    "llm_config_path": str(llm_config_path),
                     "batch_id": stored["data"]["batch_id"],
                     "style": "zhihu",
                     "generation_mode": "llm",
@@ -1235,6 +1638,7 @@ def test_build_story_drafts_action_supports_llm_generation_mode(tmp_path: Path) 
     with serve_mock_responses_api(
         {
             "id": "chatcmpl_draft_cli_123",
+            "usage": {"prompt_tokens": 333, "completion_tokens": 777, "total_tokens": 1110},
             "choices": [
                 {
                     "message": {
@@ -1284,8 +1688,11 @@ def test_build_story_drafts_action_supports_llm_generation_mode(tmp_path: Path) 
     assert built_drafts["data"]["provider_name"] == "openrouter"
     assert built_drafts["data"]["model_name"] == "qwen/qwen3.6-plus:free"
     assert built_drafts["data"]["created_count"] == 1
+    assert built_drafts["data"]["token_usage"] == {"prompt_tokens": 333, "completion_tokens": 777, "total_tokens": 1110}
+    assert built_drafts["data"]["items"][0]["token_usage"] == {"prompt_tokens": 333, "completion_tokens": 777, "total_tokens": 1110}
     assert listed["data"]["count"] == 1
     assert listed["data"]["items"][0]["generation_mode"] == "llm"
+    assert listed["data"]["items"][0]["token_usage"] == {"prompt_tokens": 333, "completion_tokens": 777, "total_tokens": 1110}
     assert "## 正文" in listed["data"]["items"][0]["content_markdown"]
     assert handler.last_request is not None
     assert handler.last_request["model"] == "qwen/qwen3.6-plus:free"
