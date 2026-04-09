@@ -18,6 +18,7 @@ DEFAULT_EXCLUDE_PATTERNS = [
     "local/",
     "outputs/",
     "temp/",
+    "*/temp/",
     ".env",
     ".env.*",
     "*.pyc",
@@ -29,6 +30,15 @@ DEFAULT_EXCLUDE_PATTERNS = [
 
 def _normalize_pattern(value: str) -> str:
     return value.strip().replace("\\", "/")
+
+
+def _contains_glob(pattern: str) -> bool:
+    return any(symbol in pattern for symbol in "*?[]")
+
+
+def _iter_path_prefixes(normalized_path: str) -> list[str]:
+    parts = normalized_path.split("/")
+    return ["/".join(parts[:index]) for index in range(1, len(parts) + 1)]
 
 
 def normalize_exclude_patterns(extra_patterns: list[str] | None = None) -> list[str]:
@@ -75,7 +85,11 @@ def should_exclude(relative_path: Path, patterns: list[str]) -> bool:
     for pattern in patterns:
         if pattern.endswith("/"):
             prefix = pattern[:-1]
-            if normalized_path == prefix or normalized_path.startswith(prefix + "/"):
+            if not _contains_glob(prefix):
+                if normalized_path == prefix or normalized_path.startswith(prefix + "/"):
+                    return True
+                continue
+            if any(fnmatch.fnmatch(prefix_candidate, prefix) for prefix_candidate in _iter_path_prefixes(normalized_path)):
                 return True
             continue
         if fnmatch.fnmatch(normalized_path, pattern):

@@ -63,6 +63,7 @@ def test_sync_publish_repo_skips_private_and_generated_files(tmp_path: Path) -> 
     source_dir.mkdir()
     (source_dir / "tools").mkdir()
     (source_dir / "tests" / "tools").mkdir(parents=True)
+    (source_dir / "tests" / "temp").mkdir(parents=True)
     (source_dir / "local").mkdir()
     (source_dir / "outputs").mkdir()
     (source_dir / "docs" / "memory").mkdir(parents=True)
@@ -73,6 +74,7 @@ def test_sync_publish_repo_skips_private_and_generated_files(tmp_path: Path) -> 
     (source_dir / "tools" / "story_cli.py").write_text("print('ok')\n", encoding="utf-8")
     (source_dir / "tools" / "dev_todoist_cli.py").write_text("print('todoist')\n", encoding="utf-8")
     (source_dir / "tests" / "tools" / "test_dev_todoist_cli.py").write_text("def test_ok(): pass\n", encoding="utf-8")
+    (source_dir / "tests" / "temp" / "ssh.log").write_text("private ssh log\n", encoding="utf-8")
     (source_dir / "local" / "dev_env.ps1").write_text("$env:KEY='secret'\n", encoding="utf-8")
     (source_dir / "outputs" / "report.json").write_text("{}\n", encoding="utf-8")
     (source_dir / "docs" / "memory" / "note.md").write_text("private\n", encoding="utf-8")
@@ -92,8 +94,16 @@ def test_sync_publish_repo_skips_private_and_generated_files(tmp_path: Path) -> 
     assert not (target_dir / "docs" / "superpowers" / "plans" / "plan.md").exists()
     assert not (target_dir / "tools" / "dev_todoist_cli.py").exists()
     assert not (target_dir / "tests" / "tools" / "test_dev_todoist_cli.py").exists()
+    assert not (target_dir / "tests" / "temp" / "ssh.log").exists()
     assert not (target_dir / "zhihu-yanxuan-short-story2" / "SKILL.md").exists()
     assert not (target_dir / ".env").exists()
+
+
+def test_normalize_exclude_patterns_includes_nested_temp_dirs() -> None:
+    patterns = normalize_exclude_patterns()
+
+    assert "temp/" in patterns
+    assert "*/temp/" in patterns
 
 
 def test_sync_publish_repo_reports_stale_files_in_target(tmp_path: Path) -> None:

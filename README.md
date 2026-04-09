@@ -752,9 +752,18 @@ $env:PYTHONDONTWRITEBYTECODE='1'
 - [SKILL.md](./SKILL.md)
 - [workflow.md](./references/workflow.md)
 - [quality-checklist.md](./references/quality-checklist.md)
+- [LICENSE](./LICENSE)
 - [开发目录与发布目录隔离方案](./docs/开发目录与发布目录隔离方案.md)
 - [真实样本回归 runner 使用说明](./docs/真实样本回归runner使用说明.md)
 - [验收阶段执行方案](./docs/验收阶段执行方案.md)
+
+## 开源协议
+
+当前仓库采用：
+
+- `Apache License 2.0`
+
+使用、修改和分发前，请先阅读根目录 [LICENSE](./LICENSE)。
 
 ## 下一步建议
 
