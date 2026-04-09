@@ -361,7 +361,7 @@ def test_build_llm_story_draft_retries_once_when_length_constraints_fail() -> No
         extra_headers: dict[str, str] | None = None,
     ) -> dict:
         call_count["value"] += 1
-        prompts.append(payload["messages"][1]["content"])
+        prompts.append(payload["messages"][1]["content"][0]["text"])
         response_body = (
             build_short_invalid_draft_payload()
             if call_count["value"] == 1
@@ -508,7 +508,7 @@ def test_build_llm_story_draft_uses_segmented_generation_for_long_targets() -> N
         timeout_seconds: int,
         extra_headers: dict[str, str] | None = None,
     ) -> dict:
-        prompt = payload["messages"][1]["content"]
+        prompt = payload["messages"][1]["content"][0]["text"]
         prompts.append(prompt)
         assert payload["stream"] is True
         if "你当前只负责写这篇故事的简介 summary" in prompt:
@@ -579,7 +579,7 @@ def test_build_llm_story_draft_allows_segmented_first_chapter_to_exceed_soft_bud
         timeout_seconds: int,
         extra_headers: dict[str, str] | None = None,
     ) -> dict:
-        prompt = payload["messages"][1]["content"]
+        prompt = payload["messages"][1]["content"][0]["text"]
         prompts.append(prompt)
         if "你当前只负责写这篇故事的简介 summary" in prompt:
             return {
@@ -637,7 +637,7 @@ def test_build_llm_story_draft_accepts_segmented_chapter_small_overflow_without_
         timeout_seconds: int,
         extra_headers: dict[str, str] | None = None,
     ) -> dict:
-        prompt = payload["messages"][1]["content"]
+        prompt = payload["messages"][1]["content"][0]["text"]
         if "你当前只负责写这篇故事的简介 summary" in prompt:
             return {
                 "id": "seg_summary_trim",
@@ -692,7 +692,7 @@ def test_build_llm_story_draft_accepts_plain_text_segmented_chapter_output() -> 
         timeout_seconds: int,
         extra_headers: dict[str, str] | None = None,
     ) -> dict:
-        prompt = payload["messages"][1]["content"]
+        prompt = payload["messages"][1]["content"][0]["text"]
         if "你当前只负责写这篇故事的简介 summary" in prompt:
             return {
                 "id": "seg_summary_plain_text",
@@ -740,7 +740,7 @@ def test_build_llm_story_draft_accepts_segmented_overlong_chapter_when_total_is_
         timeout_seconds: int,
         extra_headers: dict[str, str] | None = None,
     ) -> dict:
-        prompt = payload["messages"][1]["content"]
+        prompt = payload["messages"][1]["content"][0]["text"]
         if "你当前只负责写这篇故事的简介 summary" in prompt:
             return {
                 "id": "seg_summary_large_chapter",
@@ -797,7 +797,7 @@ def test_build_llm_story_draft_retries_segmented_chapter_when_invalid() -> None:
         timeout_seconds: int,
         extra_headers: dict[str, str] | None = None,
     ) -> dict:
-        prompt = payload["messages"][1]["content"]
+        prompt = payload["messages"][1]["content"][0]["text"]
         prompts.append(prompt)
         if "你当前只负责写这篇故事的简介 summary" in prompt:
             return {

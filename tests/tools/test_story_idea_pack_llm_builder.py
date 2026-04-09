@@ -12,6 +12,7 @@ from tools.story_idea_pack_llm_builder import (
     LlmTransportError,
     build_llm_idea_pack,
     build_llm_idea_pack_with_fallbacks,
+    build_provider_chat_completions_options,
     post_json_api,
 )
 
@@ -189,7 +190,26 @@ def test_build_llm_idea_pack_supports_deepseek_json_mode() -> None:
     assert isinstance(request_payload, dict)
     assert request_payload["response_format"] == {"type": "json_object"}
     assert request_payload["max_tokens"] == 1200
-    assert "stream" not in request_payload
+    assert request_payload["stream"] is True
+
+
+def test_build_provider_chat_completions_options_adds_stream_options_for_custom_provider() -> None:
+    options = build_provider_chat_completions_options(
+        route={
+            "provider_name": "codexhkpe",
+            "api_mode": "chat_completions",
+            "model_name": "gpt-5.4",
+            "api_url": "https://codex-api.hk.pe/v1/chat/completions",
+            "timeout_seconds": 240,
+            "api_key_env": "CODEX_API_HK_PE_API_KEY",
+            "model_config_key": "codexhkpe_gpt54_plan",
+            "header_env_names": {},
+        },
+        stream=True,
+    )
+
+    assert options["stream"] is True
+    assert options["stream_options"] == {"include_usage": True}
 
 
 def test_post_json_api_supports_streaming_chat_completions(monkeypatch: pytest.MonkeyPatch) -> None:

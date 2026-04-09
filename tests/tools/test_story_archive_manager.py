@@ -185,6 +185,12 @@ def build_run_dir_with_story_data(tmp_path: Path) -> tuple[Path, dict[str, int]]
                     "draft_id": draft["draft_id"],
                     "title": draft["title"],
                     "body_char_count": draft["body_char_count"],
+                    "auto_revised": True,
+                    "revision_round_count": 2,
+                    "content_changed": True,
+                    "body_char_count_before_revision": 7,
+                    "body_char_count_after_revision": 8,
+                    "body_char_count_delta": 1,
                 },
                 "inspect": {
                     "overall_ok": True,
@@ -257,7 +263,7 @@ def test_archive_run_persists_selected_story_chain(tmp_path: Path) -> None:
 
     job_row = query_one(
         archive_db_path,
-        "SELECT selected_card_id, selected_pack_id, selected_plan_id, selected_payload_id, selected_draft_id, inspect_overall_ok FROM archive_jobs WHERE job_id = ?",
+        "SELECT selected_card_id, selected_pack_id, selected_plan_id, selected_payload_id, selected_draft_id, inspect_overall_ok, selected_draft_auto_revised, selected_draft_revision_round_count, selected_draft_content_changed, selected_draft_body_chars_before_revision, selected_draft_body_chars_after_revision, selected_draft_body_char_delta FROM archive_jobs WHERE job_id = ?",
         ("run_001",),
     )
     assert job_row["selected_card_id"] == ids["card_id"]
@@ -266,6 +272,12 @@ def test_archive_run_persists_selected_story_chain(tmp_path: Path) -> None:
     assert job_row["selected_payload_id"] == ids["payload_id"]
     assert job_row["selected_draft_id"] == ids["draft_id"]
     assert job_row["inspect_overall_ok"] == 1
+    assert job_row["selected_draft_auto_revised"] == 1
+    assert job_row["selected_draft_revision_round_count"] == 2
+    assert job_row["selected_draft_content_changed"] == 1
+    assert job_row["selected_draft_body_chars_before_revision"] == 7
+    assert job_row["selected_draft_body_chars_after_revision"] == 8
+    assert job_row["selected_draft_body_char_delta"] == 1
 
     pack_row = query_one(
         archive_db_path,

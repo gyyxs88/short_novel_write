@@ -164,6 +164,11 @@
 4. 如果需要标记当前采用版本，可用 `update_story_draft_status`
 5. 如果走 LLM 链，正文阶段可以和方案阶段使用不同 `llm_environment`
 6. 对豆瓣风格，正文环境默认要比方案环境更保守，优先给更长 timeout，不要直接复用知乎或方案阶段的环境
+7. 如果当前目标是直接生成可进入自检和保存的版本，优先在 `build_story_drafts` 时开启：
+   - `auto_revise=true`
+   - 知乎风传 `revision_profile_name="zhihu_tight_hook"`
+   - 豆瓣风传 `revision_profile_name="douban_subtle_scene"`
+8. 只有在需要保留原始首稿做对比时，才关闭 `auto_revise`
 
 ### 第 7 步：自检与修订阶段
 
@@ -192,6 +197,12 @@
 - 先修当前草稿
 - 再重复执行 `inspect`
 - 不因为一轮检查失败就放弃既有稿件
+
+如果当前正文来自 `build_story_drafts` 且已开启 `auto_revise`：
+
+- `inspect` 默认直接检查修订后的 draft 主记录
+- 先看自动修订后版本还有哪些结构或质量问题
+- 只在自动修订仍未过关时，才额外手动调用 `revise_story_draft`
 
 ### 第 8 步：保存阶段
 

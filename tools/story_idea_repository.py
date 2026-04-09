@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from tools.story_token_usage import normalize_token_usage
+from tools.story_style_profile import VALID_PROFILE_SOURCE_TYPES, normalize_style_profile_record
 
 
 class AutoClosingConnection(sqlite3.Connection):
@@ -196,6 +197,62 @@ CREATE TABLE IF NOT EXISTS story_drafts (
 CREATE INDEX IF NOT EXISTS idx_story_drafts_payload_id ON story_drafts(payload_id);
 CREATE INDEX IF NOT EXISTS idx_story_drafts_status_generation_updated_at
     ON story_drafts(draft_status, generation_mode, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS story_draft_analyses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    draft_id INTEGER NOT NULL,
+    analyzer_name TEXT NOT NULL,
+    style TEXT NOT NULL,
+    profile_name TEXT NOT NULL,
+    overall_score INTEGER NOT NULL,
+    dimension_scores_json TEXT NOT NULL,
+    issue_count INTEGER NOT NULL,
+    analysis_report_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(draft_id) REFERENCES story_drafts(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_story_draft_analyses_draft_id ON story_draft_analyses(draft_id);
+CREATE INDEX IF NOT EXISTS idx_story_draft_analyses_analyzer_profile_created_at
+    ON story_draft_analyses(analyzer_name, profile_name, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS story_style_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_name TEXT NOT NULL UNIQUE,
+    source_type TEXT NOT NULL,
+    style TEXT NOT NULL,
+    profile_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_story_style_profiles_style_source_type_updated_at
+    ON story_style_profiles(style, source_type, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS story_draft_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    draft_id INTEGER NOT NULL,
+    analysis_id INTEGER NOT NULL,
+    generation_mode TEXT NOT NULL,
+    revision_modes_json TEXT NOT NULL,
+    provider_name TEXT NOT NULL,
+    api_mode TEXT NOT NULL,
+    model_name TEXT NOT NULL,
+    model_config_key TEXT NOT NULL,
+    provider_response_id TEXT NOT NULL,
+    token_usage_json TEXT NOT NULL DEFAULT '{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}',
+    before_content_markdown TEXT NOT NULL,
+    after_content_markdown TEXT NOT NULL,
+    changed_spans_json TEXT NOT NULL,
+    review_metadata_json TEXT NOT NULL DEFAULT '{}',
+    revision_summary TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(draft_id) REFERENCES story_drafts(id),
+    FOREIGN KEY(analysis_id) REFERENCES story_draft_analyses(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_story_draft_revisions_draft_id ON story_draft_revisions(draft_id);
+CREATE INDEX IF NOT EXISTS idx_story_draft_revisions_analysis_id ON story_draft_revisions(analysis_id);
 """
 
 
@@ -276,6 +333,7 @@ class StoryIdeaRepository:
         with self._connect() as connection:
             connection.executescript(SCHEMA_SQL)
             self._ensure_token_usage_columns(connection)
+            self._ensure_story_draft_revision_columns(connection)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, factory=AutoClosingConnection)
@@ -313,6 +371,14 @@ class StoryIdeaRepository:
                 column_name="token_usage_json",
                 column_definition=default_value,
             )
+
+    def _ensure_story_draft_revision_columns(self, connection: sqlite3.Connection) -> None:
+        self._ensure_table_column(
+            connection,
+            table_name="story_draft_revisions",
+            column_name="review_metadata_json",
+            column_definition="TEXT NOT NULL DEFAULT '{}'",
+        )
 
     def _validate_source_mode(self, source_mode: str) -> str:
         normalized = _normalize_string(source_mode, "source_mode")
@@ -366,6 +432,12 @@ class StoryIdeaRepository:
         normalized = _normalize_string(recommendation, "recommendation")
         if normalized not in VALID_EVALUATION_RECOMMENDATIONS:
             raise ValueError(f"recommendation 仅支持：{sorted(VALID_EVALUATION_RECOMMENDATIONS)}")
+        return normalized
+
+    def _validate_style_profile_source_type(self, source_type: str) -> str:
+        normalized = _normalize_string(source_type, "source_type")
+        if normalized not in VALID_PROFILE_SOURCE_TYPES:
+            raise ValueError(f"source_type 仅支持：{sorted(VALID_PROFILE_SOURCE_TYPES)}")
         return normalized
 
     def _row_to_card(self, row: sqlite3.Row) -> dict[str, Any]:
@@ -541,6 +613,75 @@ class StoryIdeaRepository:
                 "target_chapter_count": row["target_chapter_count"],
             }
         return draft
+
+    def _row_to_story_draft_analysis(self, row: sqlite3.Row) -> dict[str, Any]:
+        analysis = {
+            "analysis_id": row["id"],
+            "draft_id": row["draft_id"],
+            "analyzer_name": row["analyzer_name"],
+            "style": row["style"],
+            "profile_name": row["profile_name"],
+            "overall_score": row["overall_score"],
+            "dimension_scores": json.loads(row["dimension_scores_json"]),
+            "issue_count": row["issue_count"],
+            "analysis_report": json.loads(row["analysis_report_json"]),
+            "created_at": row["created_at"],
+        }
+        if "draft_title" in row.keys():
+            analysis["draft"] = {
+                "draft_id": row["draft_id"],
+                "draft_title": row["draft_title"],
+                "draft_generation_mode": row["draft_generation_mode"],
+                "draft_status": row["draft_status"],
+                "payload_style": row["payload_style"],
+            }
+        return analysis
+
+    def _row_to_story_style_profile(self, row: sqlite3.Row) -> dict[str, Any]:
+        profile = json.loads(row["profile_json"])
+        if not isinstance(profile, dict):
+            raise ValueError("profile_json 必须是对象。")
+        profile_data = {
+            "style_profile_id": row["id"],
+            "profile_name": row["profile_name"],
+            "source_type": row["source_type"],
+            "style": row["style"],
+            "profile": profile,
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+        return profile_data
+
+    def _row_to_story_draft_revision(self, row: sqlite3.Row) -> dict[str, Any]:
+        revision = {
+            "revision_id": row["id"],
+            "draft_id": row["draft_id"],
+            "analysis_id": row["analysis_id"],
+            "generation_mode": row["generation_mode"],
+            "revision_modes": json.loads(row["revision_modes_json"]),
+            "provider_name": row["provider_name"],
+            "api_mode": row["api_mode"],
+            "model_name": row["model_name"],
+            "model_config_key": row["model_config_key"],
+            "provider_response_id": row["provider_response_id"],
+            "token_usage": _json_loads_token_usage(
+                row["token_usage_json"] if "token_usage_json" in row.keys() else None
+            ),
+            "before_content_markdown": row["before_content_markdown"],
+            "after_content_markdown": row["after_content_markdown"],
+            "changed_spans": json.loads(row["changed_spans_json"]),
+            "review_metadata": json.loads(row["review_metadata_json"]) if "review_metadata_json" in row.keys() else {},
+            "revision_summary": row["revision_summary"],
+            "created_at": row["created_at"],
+        }
+        if "draft_title" in row.keys():
+            revision["draft"] = {
+                "draft_id": row["draft_id"],
+                "draft_title": row["draft_title"],
+                "draft_generation_mode": row["draft_generation_mode"],
+                "draft_status": row["draft_status"],
+            }
+        return revision
 
     def store_idea_cards(
         self,
@@ -1721,6 +1862,144 @@ class StoryIdeaRepository:
             rows = connection.execute("\n".join(sql_lines), params).fetchall()
         return [self._row_to_story_payload(row) for row in rows]
 
+    def get_story_draft(
+        self,
+        *,
+        draft_id: int,
+    ) -> dict[str, Any]:
+        normalized_draft_id = _normalize_int(draft_id, "draft_id")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    sd.id,
+                    sd.payload_id,
+                    sd.generation_mode,
+                    sd.provider_name,
+                    sd.api_mode,
+                    sd.model_name,
+                    sd.model_config_key,
+                    sd.provider_response_id,
+                    sd.token_usage_json,
+                    sd.title,
+                    sd.content_markdown,
+                    sd.summary_text,
+                    sd.body_char_count,
+                    sd.draft_status,
+                    sd.review_note,
+                    sd.created_at,
+                    sd.updated_at,
+                    sp.title AS payload_title,
+                    sp.style AS payload_style,
+                    sp.target_chapter_count
+                FROM story_drafts sd
+                JOIN story_payloads sp ON sp.id = sd.payload_id
+                WHERE sd.id = ?
+                """,
+                (normalized_draft_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"未找到 draft_id={normalized_draft_id} 的正文草稿。")
+        return self._row_to_story_draft(row)
+
+    def get_story_style_profile(
+        self,
+        *,
+        profile_name: str,
+    ) -> dict[str, Any]:
+        normalized_profile_name = _normalize_string(profile_name, "profile_name")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    id,
+                    profile_name,
+                    source_type,
+                    style,
+                    profile_json,
+                    created_at,
+                    updated_at
+                FROM story_style_profiles
+                WHERE profile_name = ?
+                """,
+                (normalized_profile_name,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"未找到 profile_name={normalized_profile_name} 的风格画像。")
+        return self._row_to_story_style_profile(row)
+
+    def get_story_draft_analysis(
+        self,
+        *,
+        analysis_id: int,
+    ) -> dict[str, Any]:
+        normalized_analysis_id = _normalize_int(analysis_id, "analysis_id")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    sda.id,
+                    sda.draft_id,
+                    sda.analyzer_name,
+                    sda.style,
+                    sda.profile_name,
+                    sda.overall_score,
+                    sda.dimension_scores_json,
+                    sda.issue_count,
+                    sda.analysis_report_json,
+                    sda.created_at,
+                    sd.title AS draft_title,
+                    sd.generation_mode AS draft_generation_mode,
+                    sd.draft_status,
+                    sp.style AS payload_style
+                FROM story_draft_analyses sda
+                JOIN story_drafts sd ON sd.id = sda.draft_id
+                JOIN story_payloads sp ON sp.id = sd.payload_id
+                WHERE sda.id = ?
+                """,
+                (normalized_analysis_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"未找到 analysis_id={normalized_analysis_id} 的正文分析结果。")
+        return self._row_to_story_draft_analysis(row)
+
+    def get_latest_story_draft_analysis(
+        self,
+        *,
+        draft_id: int,
+    ) -> dict[str, Any]:
+        normalized_draft_id = _normalize_int(draft_id, "draft_id")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    sda.id,
+                    sda.draft_id,
+                    sda.analyzer_name,
+                    sda.style,
+                    sda.profile_name,
+                    sda.overall_score,
+                    sda.dimension_scores_json,
+                    sda.issue_count,
+                    sda.analysis_report_json,
+                    sda.created_at,
+                    sd.title AS draft_title,
+                    sd.generation_mode AS draft_generation_mode,
+                    sd.draft_status,
+                    sp.style AS payload_style
+                FROM story_draft_analyses sda
+                JOIN story_drafts sd ON sd.id = sda.draft_id
+                JOIN story_payloads sp ON sp.id = sd.payload_id
+                WHERE sda.draft_id = ?
+                ORDER BY sda.id DESC
+                LIMIT 1
+                """,
+                (normalized_draft_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"draft_id={normalized_draft_id} 还没有正文分析结果。")
+        return self._row_to_story_draft_analysis(row)
+
     def upsert_story_draft(
         self,
         *,
@@ -1998,6 +2277,545 @@ class StoryIdeaRepository:
                 (normalized_draft_id,),
             ).fetchone()
         return self._row_to_story_draft(updated_row)
+
+    def update_story_draft_content(
+        self,
+        *,
+        draft_id: int,
+        title: str,
+        content_markdown: str,
+        summary_text: str,
+        body_char_count: int,
+    ) -> dict[str, Any]:
+        normalized_draft_id = _normalize_int(draft_id, "draft_id")
+        normalized_title = _normalize_string(title, "title")
+        normalized_content_markdown = _normalize_string(content_markdown, "content_markdown")
+        normalized_summary_text = _normalize_string(summary_text, "summary_text")
+        normalized_body_char_count = _normalize_int(body_char_count, "body_char_count")
+        if normalized_body_char_count < 1:
+            raise ValueError("body_char_count 必须大于等于 1。")
+        now = utc_now()
+
+        with self._connect() as connection:
+            existing_row = connection.execute(
+                """
+                SELECT
+                    id,
+                    payload_id,
+                    generation_mode,
+                    provider_name,
+                    api_mode,
+                    model_name,
+                    model_config_key,
+                    provider_response_id,
+                    token_usage_json,
+                    title,
+                    content_markdown,
+                    summary_text,
+                    body_char_count,
+                    draft_status,
+                    review_note,
+                    created_at,
+                    updated_at
+                FROM story_drafts
+                WHERE id = ?
+                """,
+                (normalized_draft_id,),
+            ).fetchone()
+            if existing_row is None:
+                raise ValueError(f"未找到 draft_id={normalized_draft_id} 的正文草稿。")
+
+            connection.execute(
+                """
+                UPDATE story_drafts
+                SET title = ?,
+                    content_markdown = ?,
+                    summary_text = ?,
+                    body_char_count = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    normalized_title,
+                    normalized_content_markdown,
+                    normalized_summary_text,
+                    normalized_body_char_count,
+                    now,
+                    normalized_draft_id,
+                ),
+            )
+            updated_row = connection.execute(
+                """
+                SELECT
+                    sd.id,
+                    sd.payload_id,
+                    sd.generation_mode,
+                    sd.provider_name,
+                    sd.api_mode,
+                    sd.model_name,
+                    sd.model_config_key,
+                    sd.provider_response_id,
+                    sd.token_usage_json,
+                    sd.title,
+                    sd.content_markdown,
+                    sd.summary_text,
+                    sd.body_char_count,
+                    sd.draft_status,
+                    sd.review_note,
+                    sd.created_at,
+                    sd.updated_at,
+                    sp.title AS payload_title,
+                    sp.style AS payload_style,
+                    sp.target_chapter_count
+                FROM story_drafts sd
+                JOIN story_payloads sp ON sp.id = sd.payload_id
+                WHERE sd.id = ?
+                """,
+                (normalized_draft_id,),
+            ).fetchone()
+        return self._row_to_story_draft(updated_row)
+
+    def create_story_draft_analysis(
+        self,
+        *,
+        draft_id: int,
+        analyzer_name: str,
+        style: str = "",
+        profile_name: str = "",
+        overall_score: int,
+        dimension_scores: dict[str, Any],
+        issue_count: int,
+        analysis_report: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized_draft_id = _normalize_int(draft_id, "draft_id")
+        normalized_analyzer_name = _normalize_string(analyzer_name, "analyzer_name")
+        normalized_style = style.strip() if isinstance(style, str) else ""
+        normalized_profile_name = profile_name.strip() if isinstance(profile_name, str) else ""
+        normalized_overall_score = _normalize_int(overall_score, "overall_score")
+        normalized_issue_count = _normalize_int(issue_count, "issue_count")
+        if normalized_overall_score < 0 or normalized_overall_score > 100:
+            raise ValueError("overall_score 必须在 0-100 之间。")
+        if normalized_issue_count < 0:
+            raise ValueError("issue_count 不能小于 0。")
+        if not isinstance(dimension_scores, dict):
+            raise ValueError("dimension_scores 必须是对象。")
+        if not isinstance(analysis_report, dict):
+            raise ValueError("analysis_report 必须是对象。")
+        now = utc_now()
+
+        with self._connect() as connection:
+            existing_draft = connection.execute(
+                "SELECT id FROM story_drafts WHERE id = ?",
+                (normalized_draft_id,),
+            ).fetchone()
+            if existing_draft is None:
+                raise ValueError(f"未找到 draft_id={normalized_draft_id} 的正文草稿。")
+
+            connection.execute(
+                """
+                INSERT INTO story_draft_analyses (
+                    draft_id,
+                    analyzer_name,
+                    style,
+                    profile_name,
+                    overall_score,
+                    dimension_scores_json,
+                    issue_count,
+                    analysis_report_json,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_draft_id,
+                    normalized_analyzer_name,
+                    normalized_style,
+                    normalized_profile_name,
+                    normalized_overall_score,
+                    _json_dumps(dimension_scores),
+                    normalized_issue_count,
+                    _json_dumps(analysis_report),
+                    now,
+                ),
+            )
+            analysis_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+            row = connection.execute(
+                """
+                SELECT
+                    sda.id,
+                    sda.draft_id,
+                    sda.analyzer_name,
+                    sda.style,
+                    sda.profile_name,
+                    sda.overall_score,
+                    sda.dimension_scores_json,
+                    sda.issue_count,
+                    sda.analysis_report_json,
+                    sda.created_at,
+                    sd.title AS draft_title,
+                    sd.generation_mode AS draft_generation_mode,
+                    sd.draft_status,
+                    sp.style AS payload_style
+                FROM story_draft_analyses sda
+                JOIN story_drafts sd ON sd.id = sda.draft_id
+                JOIN story_payloads sp ON sp.id = sd.payload_id
+                WHERE sda.id = ?
+                """,
+                (analysis_id,),
+            ).fetchone()
+        return self._row_to_story_draft_analysis(row)
+
+    def upsert_story_style_profile(
+        self,
+        *,
+        profile_name: str,
+        source_type: str,
+        style: str,
+        profile: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized_profile_name = _normalize_string(profile_name, "profile_name")
+        normalized_profile = normalize_style_profile_record(profile)
+        normalized_source_type = normalized_profile["source_type"]
+        normalized_style = normalized_profile["style"]
+        if normalized_source_type != self._validate_style_profile_source_type(source_type):
+            raise ValueError("source_type 必须与 profile.source_type 一致。")
+        if normalized_style != self._validate_style(style):
+            raise ValueError("style 必须与 profile.style 一致。")
+        if normalized_profile["profile_name"] != normalized_profile_name:
+            raise ValueError("profile_name 必须与 profile.profile_name 一致。")
+        now = utc_now()
+
+        with self._connect() as connection:
+            existing_row = connection.execute(
+                """
+                SELECT
+                    id,
+                    profile_name,
+                    source_type,
+                    style,
+                    profile_json,
+                    created_at,
+                    updated_at
+                FROM story_style_profiles
+                WHERE profile_name = ?
+                """,
+                (normalized_profile_name,),
+            ).fetchone()
+            if existing_row is None:
+                connection.execute(
+                    """
+                    INSERT INTO story_style_profiles (
+                        profile_name,
+                        source_type,
+                        style,
+                        profile_json,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_profile_name,
+                        normalized_source_type,
+                        normalized_style,
+                        _json_dumps(normalized_profile),
+                        now,
+                        now,
+                    ),
+                )
+                status = "created"
+            else:
+                connection.execute(
+                    """
+                    UPDATE story_style_profiles
+                    SET source_type = ?,
+                        style = ?,
+                        profile_json = ?,
+                        updated_at = ?
+                    WHERE profile_name = ?
+                    """,
+                    (
+                        normalized_source_type,
+                        normalized_style,
+                        _json_dumps(normalized_profile),
+                        now,
+                        normalized_profile_name,
+                    ),
+                )
+                status = "updated"
+
+            row = connection.execute(
+                """
+                SELECT
+                    id,
+                    profile_name,
+                    source_type,
+                    style,
+                    profile_json,
+                    created_at,
+                    updated_at
+                FROM story_style_profiles
+                WHERE profile_name = ?
+                """,
+                (normalized_profile_name,),
+            ).fetchone()
+        return {"status": status, **self._row_to_story_style_profile(row)}
+
+    def list_story_style_profiles(
+        self,
+        *,
+        style: str | None = None,
+        source_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        sql_lines = [
+            "SELECT id, profile_name, source_type, style, profile_json, created_at, updated_at",
+            "FROM story_style_profiles",
+            "WHERE 1 = 1",
+        ]
+        if style is not None:
+            sql_lines.append("AND style = ?")
+            params.append(self._validate_style(style))
+        if source_type is not None:
+            normalized_source_type = self._validate_style_profile_source_type(source_type)
+            sql_lines.append("AND source_type = ?")
+            params.append(normalized_source_type)
+
+        sql_lines.append("ORDER BY updated_at DESC, profile_name ASC")
+        with self._connect() as connection:
+            rows = connection.execute("\n".join(sql_lines), params).fetchall()
+        return [self._row_to_story_style_profile(row) for row in rows]
+
+    def create_story_draft_revision(
+        self,
+        *,
+        draft_id: int,
+        analysis_id: int,
+        generation_mode: str,
+        revision_modes: list[str],
+        provider_name: str = "",
+        api_mode: str = "",
+        model_name: str = "",
+        model_config_key: str = "",
+        provider_response_id: str = "",
+        token_usage: dict[str, Any] | None = None,
+        before_content_markdown: str,
+        after_content_markdown: str,
+        changed_spans: list[dict[str, Any]],
+        revision_summary: str,
+        review_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_draft_id = _normalize_int(draft_id, "draft_id")
+        normalized_analysis_id = _normalize_int(analysis_id, "analysis_id")
+        normalized_generation_mode = self._validate_generation_mode(generation_mode)
+        normalized_provider_name = provider_name.strip() if isinstance(provider_name, str) else ""
+        normalized_api_mode = api_mode.strip() if isinstance(api_mode, str) else ""
+        normalized_model_name = model_name.strip() if isinstance(model_name, str) else ""
+        normalized_model_config_key = model_config_key.strip() if isinstance(model_config_key, str) else ""
+        normalized_provider_response_id = provider_response_id.strip() if isinstance(provider_response_id, str) else ""
+        normalized_token_usage = normalize_token_usage(token_usage)
+        normalized_before_content_markdown = _normalize_string(
+            before_content_markdown,
+            "before_content_markdown",
+        )
+        normalized_after_content_markdown = _normalize_string(
+            after_content_markdown,
+            "after_content_markdown",
+        )
+        normalized_revision_summary = _normalize_string(revision_summary, "revision_summary")
+        normalized_review_metadata = review_metadata or {}
+        if not isinstance(revision_modes, list) or not revision_modes:
+            raise ValueError("revision_modes 必须是非空数组。")
+        if not isinstance(changed_spans, list):
+            raise ValueError("changed_spans 必须是数组。")
+        if not isinstance(normalized_review_metadata, dict):
+            raise ValueError("review_metadata 必须是对象。")
+        now = utc_now()
+
+        with self._connect() as connection:
+            draft_row = connection.execute(
+                "SELECT id FROM story_drafts WHERE id = ?",
+                (normalized_draft_id,),
+            ).fetchone()
+            if draft_row is None:
+                raise ValueError(f"未找到 draft_id={normalized_draft_id} 的正文草稿。")
+            analysis_row = connection.execute(
+                "SELECT id, draft_id FROM story_draft_analyses WHERE id = ?",
+                (normalized_analysis_id,),
+            ).fetchone()
+            if analysis_row is None:
+                raise ValueError(f"未找到 analysis_id={normalized_analysis_id} 的正文分析结果。")
+            if int(analysis_row["draft_id"]) != normalized_draft_id:
+                raise ValueError("analysis_id 与 draft_id 不匹配。")
+
+            connection.execute(
+                """
+                INSERT INTO story_draft_revisions (
+                    draft_id,
+                    analysis_id,
+                    generation_mode,
+                    revision_modes_json,
+                    provider_name,
+                    api_mode,
+                    model_name,
+                    model_config_key,
+                    provider_response_id,
+                    token_usage_json,
+                    before_content_markdown,
+                    after_content_markdown,
+                    changed_spans_json,
+                    review_metadata_json,
+                    revision_summary,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_draft_id,
+                    normalized_analysis_id,
+                    normalized_generation_mode,
+                    _json_dumps(revision_modes),
+                    normalized_provider_name,
+                    normalized_api_mode,
+                    normalized_model_name,
+                    normalized_model_config_key,
+                    normalized_provider_response_id,
+                    _json_dumps(normalized_token_usage),
+                    normalized_before_content_markdown,
+                    normalized_after_content_markdown,
+                    _json_dumps(changed_spans),
+                    _json_dumps(normalized_review_metadata),
+                    normalized_revision_summary,
+                    now,
+                ),
+            )
+            revision_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+            row = connection.execute(
+                """
+                SELECT
+                    sdr.id,
+                    sdr.draft_id,
+                    sdr.analysis_id,
+                    sdr.generation_mode,
+                    sdr.revision_modes_json,
+                    sdr.provider_name,
+                    sdr.api_mode,
+                    sdr.model_name,
+                    sdr.model_config_key,
+                    sdr.provider_response_id,
+                    sdr.token_usage_json,
+                    sdr.before_content_markdown,
+                    sdr.after_content_markdown,
+                    sdr.changed_spans_json,
+                    sdr.review_metadata_json,
+                    sdr.revision_summary,
+                    sdr.created_at,
+                    sd.title AS draft_title,
+                    sd.generation_mode AS draft_generation_mode,
+                    sd.draft_status
+                FROM story_draft_revisions sdr
+                JOIN story_drafts sd ON sd.id = sdr.draft_id
+                WHERE sdr.id = ?
+                """,
+                (revision_id,),
+            ).fetchone()
+        return self._row_to_story_draft_revision(row)
+
+    def list_story_draft_revisions(
+        self,
+        *,
+        batch_id: int | None = None,
+        draft_ids: list[int] | None = None,
+        analysis_ids: list[int] | None = None,
+        generation_mode: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        sql_lines = [
+            "SELECT DISTINCT sdr.id, sdr.draft_id, sdr.analysis_id, sdr.generation_mode, sdr.revision_modes_json,",
+            "sdr.provider_name, sdr.api_mode, sdr.model_name, sdr.model_config_key, sdr.provider_response_id,",
+            "sdr.token_usage_json, sdr.before_content_markdown, sdr.after_content_markdown, sdr.changed_spans_json,",
+            "sdr.review_metadata_json,",
+            "sdr.revision_summary, sdr.created_at, sd.title AS draft_title, sd.generation_mode AS draft_generation_mode, sd.draft_status",
+            "FROM story_draft_revisions sdr",
+            "JOIN story_drafts sd ON sd.id = sdr.draft_id",
+            "JOIN story_payloads sp ON sp.id = sd.payload_id",
+            "JOIN story_plans p ON p.id = sp.plan_id",
+        ]
+        if batch_id is not None:
+            normalized_batch_id = _normalize_int(batch_id, "batch_id")
+            sql_lines.append("JOIN idea_packs ip ON ip.id = p.pack_id")
+            sql_lines.append("JOIN idea_batch_cards bc ON bc.card_id = ip.card_id")
+            sql_lines.append("WHERE bc.batch_id = ?")
+            params.append(normalized_batch_id)
+        else:
+            sql_lines.append("WHERE 1 = 1")
+
+        if draft_ids is not None:
+            normalized_draft_ids = _normalize_int_list(draft_ids, "draft_ids")
+            placeholders = ", ".join("?" for _ in normalized_draft_ids)
+            sql_lines.append(f"AND sdr.draft_id IN ({placeholders})")
+            params.extend(normalized_draft_ids)
+
+        if analysis_ids is not None:
+            normalized_analysis_ids = _normalize_int_list(analysis_ids, "analysis_ids")
+            placeholders = ", ".join("?" for _ in normalized_analysis_ids)
+            sql_lines.append(f"AND sdr.analysis_id IN ({placeholders})")
+            params.extend(normalized_analysis_ids)
+
+        if generation_mode is not None:
+            sql_lines.append("AND sdr.generation_mode = ?")
+            params.append(self._validate_generation_mode(generation_mode))
+
+        sql_lines.append("ORDER BY sdr.id DESC")
+        with self._connect() as connection:
+            rows = connection.execute("\n".join(sql_lines), params).fetchall()
+        return [self._row_to_story_draft_revision(row) for row in rows]
+
+    def list_story_draft_analyses(
+        self,
+        *,
+        batch_id: int | None = None,
+        draft_ids: list[int] | None = None,
+        analyzer_name: str | None = None,
+        profile_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        sql_lines = [
+            "SELECT DISTINCT sda.id, sda.draft_id, sda.analyzer_name, sda.style, sda.profile_name,",
+            "sda.overall_score, sda.dimension_scores_json, sda.issue_count, sda.analysis_report_json, sda.created_at,",
+            "sd.title AS draft_title, sd.generation_mode AS draft_generation_mode, sd.draft_status, sp.style AS payload_style",
+            "FROM story_draft_analyses sda",
+            "JOIN story_drafts sd ON sd.id = sda.draft_id",
+            "JOIN story_payloads sp ON sp.id = sd.payload_id",
+            "JOIN story_plans p ON p.id = sp.plan_id",
+        ]
+        if batch_id is not None:
+            normalized_batch_id = _normalize_int(batch_id, "batch_id")
+            sql_lines.append("JOIN idea_packs ip ON ip.id = p.pack_id")
+            sql_lines.append("JOIN idea_batch_cards bc ON bc.card_id = ip.card_id")
+            sql_lines.append("WHERE bc.batch_id = ?")
+            params.append(normalized_batch_id)
+        else:
+            sql_lines.append("WHERE 1 = 1")
+
+        if draft_ids is not None:
+            normalized_draft_ids = _normalize_int_list(draft_ids, "draft_ids")
+            placeholders = ", ".join("?" for _ in normalized_draft_ids)
+            sql_lines.append(f"AND sda.draft_id IN ({placeholders})")
+            params.extend(normalized_draft_ids)
+
+        if analyzer_name is not None:
+            sql_lines.append("AND sda.analyzer_name = ?")
+            params.append(_normalize_string(analyzer_name, "analyzer_name"))
+
+        if profile_name is not None:
+            sql_lines.append("AND sda.profile_name = ?")
+            params.append(_normalize_string(profile_name, "profile_name"))
+
+        sql_lines.append("ORDER BY sda.id DESC")
+        with self._connect() as connection:
+            rows = connection.execute("\n".join(sql_lines), params).fetchall()
+        return [self._row_to_story_draft_analysis(row) for row in rows]
 
     def upsert_idea_pack_evaluation(
         self,

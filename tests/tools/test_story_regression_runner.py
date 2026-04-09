@@ -4,7 +4,12 @@ import json
 from pathlib import Path
 
 from tools.story_regression_runner import run_regression, run_single_sample
-from tools.story_regression_samples import GenerationRoute, RegressionSample, select_builtin_samples
+from tools.story_regression_samples import (
+    DraftPostprocessConfig,
+    GenerationRoute,
+    RegressionSample,
+    select_builtin_samples,
+)
 
 
 def build_success_response(action: str, data: dict) -> dict:
@@ -27,7 +32,12 @@ def build_error_response(action: str, code: str, message: str, details: dict | N
     }
 
 
-def build_sample(sample_key: str, *, style: str = "zhihu") -> RegressionSample:
+def build_sample(
+    sample_key: str,
+    *,
+    style: str = "zhihu",
+    draft_postprocess: DraftPostprocessConfig | None = None,
+) -> RegressionSample:
     llm_environment = f"{style}_plan_default"
     draft_environment = f"{style}_draft_default"
     return RegressionSample(
@@ -37,6 +47,7 @@ def build_sample(sample_key: str, *, style: str = "zhihu") -> RegressionSample:
         idea_pack_route=GenerationRoute(),
         plan_route=GenerationRoute(generation_mode="llm", llm_environment=llm_environment),
         draft_route=GenerationRoute(generation_mode="llm", llm_environment=draft_environment),
+        draft_postprocess=draft_postprocess or DraftPostprocessConfig(),
     )
 
 
@@ -161,14 +172,27 @@ def build_fake_invoker(*, fail_prompts: set[str] | None = None):
                     "未预期异常：The read operation timed out",
                     {"token_usage": {"prompt_tokens": 40, "completion_tokens": 0, "total_tokens": 40}},
                 )
+            auto_revise = bool(payload.get("auto_revise", False))
             return build_success_response(
                 action,
                 {
                     "generation_mode": payload["generation_mode"],
                     "created_count": 1,
                     "existing_count": 0,
+                    "auto_revise": auto_revise,
+                    "auto_revised_count": 1 if auto_revise else 0,
                     "token_usage": {"prompt_tokens": 40, "completion_tokens": 60, "total_tokens": 100},
-                    "items": [{"draft_id": payload_id * 10 + 1}],
+                    "items": [
+                        {
+                            "draft_id": payload_id * 10 + 1,
+                            "auto_revised": auto_revise,
+                            "revision_round_count": 1 if auto_revise else 0,
+                            "content_changed": auto_revise,
+                            "body_char_count_before_revision": 6100,
+                            "body_char_count_after_revision": 6200,
+                            "body_char_count_delta": 100 if auto_revise else 0,
+                        }
+                    ],
                 },
             )
 
@@ -224,7 +248,13 @@ def test_select_builtin_samples_supports_set_and_style_filters() -> None:
 
 
 def test_run_regression_writes_reports_and_counts_timeout_failures(tmp_path: Path) -> None:
-    first = build_sample("sample-pass")
+    first = build_sample(
+        "sample-pass",
+        draft_postprocess=DraftPostprocessConfig(
+            auto_revise=True,
+            revision_profile_name="zhihu_tight_hook",
+        ),
+    )
     second = build_sample("sample-timeout")
     report = run_regression(
         samples=[first, second],
@@ -239,6 +269,12 @@ def test_run_regression_writes_reports_and_counts_timeout_failures(tmp_path: Pat
     assert report["summary"]["failed_count"] == 1
     assert report["summary"]["failure_type_counts"] == {"timeout": 1}
     assert report["summary"]["stage_failure_counts"] == {"build_story_drafts": 1}
+    assert report["summary"]["auto_revised_job_count"] == 1
+    assert report["summary"]["draft_changed_job_count"] == 1
+    assert report["summary"]["revision_round_count_total"] == 1
+    assert report["summary"]["revision_round_count_avg"] == 1.0
+    assert report["summary"]["selected_draft_body_char_delta_total"] == 100
+    assert report["summary"]["selected_draft_body_char_change_total"] == 100
     assert report["summary"]["token_usage"] == {"prompt_tokens": 140, "completion_tokens": 130, "total_tokens": 270}
     assert Path(report["json_report_path"]).exists()
     assert Path(report["markdown_report_path"]).exists()
@@ -281,3 +317,42 @@ def test_run_single_sample_marks_inspect_length_failure(tmp_path: Path) -> None:
     assert result["failure_type"] == "length_constraint"
     assert result["stages"][-1]["error"]["code"] == "INSPECT_NOT_PASSABLE"
     assert result["token_usage"] == {"prompt_tokens": 70, "completion_tokens": 95, "total_tokens": 165}
+
+
+def test_run_single_sample_passes_auto_revise_payload_and_records_postprocess(tmp_path: Path) -> None:
+    sample = build_sample(
+        "auto-revise",
+        draft_postprocess=DraftPostprocessConfig(
+            auto_revise=True,
+            revision_profile_name="zhihu_tight_hook",
+            revision_modes=("remove_ai_phrases", "compress_exposition"),
+            revision_max_rounds=2,
+            revision_max_spans_per_round=2,
+        ),
+    )
+    captured_build_draft_payloads: list[dict] = []
+    base_invoke = build_fake_invoker()
+
+    def invoke(action: str, payload: dict) -> dict:
+        if action == "build_story_drafts":
+            captured_build_draft_payloads.append(payload)
+        return base_invoke(action, payload)
+
+    result = run_single_sample(
+        sample=sample,
+        db_path=tmp_path / "story.sqlite3",
+        invoke_action=invoke,
+    )
+
+    assert result["status"] == "passed"
+    assert captured_build_draft_payloads
+    assert captured_build_draft_payloads[0]["auto_revise"] is True
+    assert captured_build_draft_payloads[0]["revision_profile_name"] == "zhihu_tight_hook"
+    assert captured_build_draft_payloads[0]["revision_modes"] == ["remove_ai_phrases", "compress_exposition"]
+    assert result["route"]["draft_postprocess"]["auto_revise"] is True
+    assert result["selected_draft"]["auto_revised"] is True
+    assert result["selected_draft"]["revision_round_count"] == 1
+    assert result["selected_draft"]["content_changed"] is True
+    assert result["selected_draft"]["body_char_count_before_revision"] == 6100
+    assert result["selected_draft"]["body_char_count_after_revision"] == 6200
+    assert result["selected_draft"]["body_char_count_delta"] == 100

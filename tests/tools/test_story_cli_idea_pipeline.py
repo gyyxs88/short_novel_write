@@ -1556,6 +1556,536 @@ def test_build_story_payloads_and_drafts_actions_work_together(tmp_path: Path) -
     assert updated_draft["data"]["review_note"] == "这版正文可继续修订"
 
 
+def test_analyze_story_prose_and_list_story_draft_analyses_actions_work_together(tmp_path: Path) -> None:
+    db_path = tmp_path / "story_ideas.sqlite3"
+    stored = parse_stdout_json(
+        run_cli(
+            {
+                "action": "store_idea_cards",
+                "payload": {
+                    "db_path": str(db_path),
+                    "source_mode": "seed_generate",
+                    "seed": "seed-a",
+                    "items": [
+                        {
+                            "types": ["Mystery - 悬疑 / 推理", "Modern - 现代"],
+                            "main_tags": ["Missing Person - 失踪", "First Love - 初恋", "Secret Past - 隐秘过去"],
+                        }
+                    ],
+                },
+            }
+        )
+    )
+    built_pack = parse_stdout_json(
+        run_cli(
+            {
+                "action": "build_idea_packs",
+                "payload": {
+                    "db_path": str(db_path),
+                    "batch_id": stored["data"]["batch_id"],
+                    "style": "zhihu",
+                },
+            }
+        )
+    )
+    parse_stdout_json(
+        run_cli(
+            {
+                "action": "build_story_plans",
+                "payload": {
+                    "db_path": str(db_path),
+                    "pack_ids": [built_pack["data"]["items"][0]["pack_id"]],
+                    "target_char_range": [5000, 8000],
+                    "target_chapter_count": 6,
+                    "plan_count": 4,
+                },
+            }
+        )
+    )
+    built_payloads = parse_stdout_json(
+        run_cli(
+            {
+                "action": "build_story_payloads",
+                "payload": {
+                    "db_path": str(db_path),
+                    "batch_id": stored["data"]["batch_id"],
+                },
+            }
+        )
+    )
+    built_drafts = parse_stdout_json(
+        run_cli(
+            {
+                "action": "build_story_drafts",
+                "payload": {
+                    "db_path": str(db_path),
+                    "payload_ids": [built_payloads["data"]["items"][0]["payload_id"]],
+                },
+            }
+        )
+    )
+    draft_id = built_drafts["data"]["items"][0]["draft_id"]
+
+    analyzed = parse_stdout_json(
+        run_cli(
+            {
+                "action": "analyze_story_prose",
+                "payload": {
+                    "db_path": str(db_path),
+                    "draft_id": draft_id,
+                    "profile_name": "zhihu_tight_hook",
+                },
+            }
+        )
+    )
+    listed = parse_stdout_json(
+        run_cli(
+            {
+                "action": "list_story_draft_analyses",
+                "payload": {
+                    "db_path": str(db_path),
+                    "draft_ids": [draft_id],
+                },
+            }
+        )
+    )
+
+    assert analyzed["ok"] is True
+    assert analyzed["data"]["stored"] is True
+    assert analyzed["data"]["analysis_id"] >= 1
+    assert analyzed["data"]["draft_id"] == draft_id
+    assert listed["data"]["count"] == 1
+    assert listed["data"]["items"][0]["draft_id"] == draft_id
+    assert listed["data"]["items"][0]["profile_name"] == "zhihu_tight_hook"
+
+
+def test_build_list_and_get_style_profile_actions_work_together(tmp_path: Path) -> None:
+    db_path = tmp_path / "story_ideas.sqlite3"
+
+    built_sample = parse_stdout_json(
+        run_cli(
+            {
+                "action": "build_style_profile",
+                "payload": {
+                    "db_path": str(db_path),
+                    "profile_name": "sample_douban",
+                    "style": "douban",
+                    "sample_texts": [
+                        "她把钥匙放进掌心，金属凉得发硬。‘别开门。’姐姐站在走廊尽头，声音很轻。",
+                        "雨水顺着窗缝往里渗，她抬手去擦，却先闻到木头受潮后的气味。",
+                    ],
+                },
+            }
+        )
+    )
+    built_builtin = parse_stdout_json(
+        run_cli(
+            {
+                "action": "build_style_profile",
+                "payload": {
+                    "db_path": str(db_path),
+                    "profile_name": "zhihu_tight_hook",
+                },
+            }
+        )
+    )
+    listed = parse_stdout_json(
+        run_cli(
+            {
+                "action": "list_style_profiles",
+                "payload": {
+                    "db_path": str(db_path),
+                },
+            }
+        )
+    )
+    fetched = parse_stdout_json(
+        run_cli(
+            {
+                "action": "get_style_profile",
+                "payload": {
+                    "db_path": str(db_path),
+                    "profile_name": "sample_douban",
+                },
+            }
+        )
+    )
+
+    assert built_sample["ok"] is True
+    assert built_sample["data"]["status"] == "created"
+    assert built_sample["data"]["profile"]["source_type"] == "sample_texts"
+    assert built_sample["data"]["profile"]["sample_metrics"]["sample_count"] == 2
+    assert built_builtin["ok"] is True
+    assert built_builtin["data"]["profile"]["source_type"] == "built_in"
+    assert listed["data"]["count"] >= 2
+    assert any(item["profile_name"] == "zhihu_tight_hook" for item in listed["data"]["items"])
+    assert any(item["profile_name"] == "sample_douban" for item in listed["data"]["items"])
+    assert fetched["data"]["stored"] is True
+    assert fetched["data"]["profile"]["style"] == "douban"
+
+
+def test_rewrite_story_spans_and_list_story_draft_revisions_actions_work_together(tmp_path: Path) -> None:
+    db_path = tmp_path / "story_ideas.sqlite3"
+    stored = parse_stdout_json(
+        run_cli(
+            {
+                "action": "store_idea_cards",
+                "payload": {
+                    "db_path": str(db_path),
+                    "source_mode": "seed_generate",
+                    "seed": "seed-a",
+                    "items": [
+                        {
+                            "types": ["Mystery - 悬疑 / 推理", "Modern - 现代"],
+                            "main_tags": ["Missing Person - 失踪", "First Love - 初恋", "Secret Past - 隐秘过去"],
+                        }
+                    ],
+                },
+            }
+        )
+    )
+    built_pack = parse_stdout_json(
+        run_cli(
+            {
+                "action": "build_idea_packs",
+                "payload": {
+                    "db_path": str(db_path),
+                    "batch_id": stored["data"]["batch_id"],
+                    "style": "zhihu",
+                },
+            }
+        )
+    )
+    parse_stdout_json(
+        run_cli(
+            {
+                "action": "build_story_plans",
+                "payload": {
+                    "db_path": str(db_path),
+                    "pack_ids": [built_pack["data"]["items"][0]["pack_id"]],
+                    "target_char_range": [5000, 8000],
+                    "target_chapter_count": 6,
+                    "plan_count": 4,
+                },
+            }
+        )
+    )
+    built_payloads = parse_stdout_json(
+        run_cli(
+            {
+                "action": "build_story_payloads",
+                "payload": {
+                    "db_path": str(db_path),
+                    "batch_id": stored["data"]["batch_id"],
+                },
+            }
+        )
+    )
+    built_drafts = parse_stdout_json(
+        run_cli(
+            {
+                "action": "build_story_drafts",
+                "payload": {
+                    "db_path": str(db_path),
+                    "payload_ids": [built_payloads["data"]["items"][0]["payload_id"]],
+                },
+            }
+        )
+    )
+    draft_id = built_drafts["data"]["items"][0]["draft_id"]
+
+    analyzed = parse_stdout_json(
+        run_cli(
+            {
+                "action": "analyze_story_prose",
+                "payload": {
+                    "db_path": str(db_path),
+                    "draft_id": draft_id,
+                    "profile_name": "zhihu_tight_hook",
+                },
+            }
+        )
+    )
+    rewritten = parse_stdout_json(
+        run_cli(
+            {
+                "action": "rewrite_story_spans",
+                "payload": {
+                    "db_path": str(db_path),
+                    "draft_id": draft_id,
+                    "analysis_id": analyzed["data"]["analysis_id"],
+                    "rewrite_modes": ["remove_ai_phrases", "compress_exposition"],
+                    "max_spans": 2,
+                },
+            }
+        )
+    )
+    listed = parse_stdout_json(
+        run_cli(
+            {
+                "action": "list_story_draft_revisions",
+                "payload": {
+                    "db_path": str(db_path),
+                    "draft_ids": [draft_id],
+                },
+            }
+        )
+    )
+
+    assert rewritten["ok"] is True
+    assert rewritten["data"]["draft_id"] == draft_id
+    assert rewritten["data"]["generation_mode"] == "deterministic"
+    assert rewritten["data"]["changed_spans"]
+    assert listed["data"]["count"] == 1
+    assert listed["data"]["items"][0]["analysis_id"] == analyzed["data"]["analysis_id"]
+
+
+def test_revise_story_draft_action_runs_revision_loop_and_persists_rounds(tmp_path: Path) -> None:
+    db_path = tmp_path / "story_ideas.sqlite3"
+    stored = parse_stdout_json(
+        run_cli(
+            {
+                "action": "store_idea_cards",
+                "payload": {
+                    "db_path": str(db_path),
+                    "source_mode": "seed_generate",
+                    "seed": "seed-a",
+                    "items": [
+                        {
+                            "types": ["Mystery - 悬疑 / 推理", "Modern - 现代"],
+                            "main_tags": ["Missing Person - 失踪", "First Love - 初恋", "Secret Past - 隐秘过去"],
+                        }
+                    ],
+                },
+            }
+        )
+    )
+    built_pack = parse_stdout_json(
+        run_cli(
+            {
+                "action": "build_idea_packs",
+                "payload": {
+                    "db_path": str(db_path),
+                    "batch_id": stored["data"]["batch_id"],
+                    "style": "zhihu",
+                },
+            }
+        )
+    )
+    parse_stdout_json(
+        run_cli(
+            {
+                "action": "build_story_plans",
+                "payload": {
+                    "db_path": str(db_path),
+                    "pack_ids": [built_pack["data"]["items"][0]["pack_id"]],
+                    "target_char_range": [5000, 8000],
+                    "target_chapter_count": 6,
+                    "plan_count": 4,
+                },
+            }
+        )
+    )
+    built_payloads = parse_stdout_json(
+        run_cli(
+            {
+                "action": "build_story_payloads",
+                "payload": {
+                    "db_path": str(db_path),
+                    "batch_id": stored["data"]["batch_id"],
+                },
+            }
+        )
+    )
+    built_drafts = parse_stdout_json(
+        run_cli(
+            {
+                "action": "build_story_drafts",
+                "payload": {
+                    "db_path": str(db_path),
+                    "payload_ids": [built_payloads["data"]["items"][0]["payload_id"]],
+                },
+            }
+        )
+    )
+    draft_id = built_drafts["data"]["items"][0]["draft_id"]
+
+    revised = parse_stdout_json(
+        run_cli(
+            {
+                "action": "revise_story_draft",
+                "payload": {
+                    "db_path": str(db_path),
+                    "draft_id": draft_id,
+                    "profile_name": "zhihu_tight_hook",
+                    "revision_modes": ["remove_ai_phrases", "compress_exposition"],
+                    "max_rounds": 2,
+                    "max_spans_per_round": 2,
+                },
+            }
+        )
+    )
+    analyses = parse_stdout_json(
+        run_cli(
+            {
+                "action": "list_story_draft_analyses",
+                "payload": {
+                    "db_path": str(db_path),
+                    "draft_ids": [draft_id],
+                },
+            }
+        )
+    )
+    revisions = parse_stdout_json(
+        run_cli(
+            {
+                "action": "list_story_draft_revisions",
+                "payload": {
+                    "db_path": str(db_path),
+                    "draft_ids": [draft_id],
+                },
+            }
+        )
+    )
+
+    assert revised["ok"] is True
+    assert revised["data"]["draft_id"] == draft_id
+    assert revised["data"]["generation_mode"] == "deterministic"
+    assert revised["data"]["round_count"] >= 1
+    assert revised["data"]["initial_analysis_id"] is not None
+    assert revised["data"]["final_analysis_id"] is not None
+    assert revised["data"]["rounds"][0]["revision_id"] is not None
+    assert analyses["data"]["count"] >= 2
+    assert revisions["data"]["count"] >= 1
+
+
+def test_build_story_drafts_action_can_auto_revise_and_update_draft_content(tmp_path: Path) -> None:
+    db_path = tmp_path / "story_ideas.sqlite3"
+    stored = parse_stdout_json(
+        run_cli(
+            {
+                "action": "store_idea_cards",
+                "payload": {
+                    "db_path": str(db_path),
+                    "source_mode": "seed_generate",
+                    "seed": "seed-a",
+                    "items": [
+                        {
+                            "types": ["Mystery - 悬疑 / 推理", "Modern - 现代"],
+                            "main_tags": ["Missing Person - 失踪", "First Love - 初恋", "Secret Past - 隐秘过去"],
+                        }
+                    ],
+                },
+            }
+        )
+    )
+    built_pack = parse_stdout_json(
+        run_cli(
+            {
+                "action": "build_idea_packs",
+                "payload": {
+                    "db_path": str(db_path),
+                    "batch_id": stored["data"]["batch_id"],
+                    "style": "zhihu",
+                },
+            }
+        )
+    )
+    parse_stdout_json(
+        run_cli(
+            {
+                "action": "build_story_plans",
+                "payload": {
+                    "db_path": str(db_path),
+                    "pack_ids": [built_pack["data"]["items"][0]["pack_id"]],
+                    "target_char_range": [5000, 8000],
+                    "target_chapter_count": 6,
+                    "plan_count": 4,
+                },
+            }
+        )
+    )
+    built_payloads = parse_stdout_json(
+        run_cli(
+            {
+                "action": "build_story_payloads",
+                "payload": {
+                    "db_path": str(db_path),
+                    "batch_id": stored["data"]["batch_id"],
+                },
+            }
+        )
+    )
+
+    built_drafts = parse_stdout_json(
+        run_cli(
+            {
+                "action": "build_story_drafts",
+                "payload": {
+                    "db_path": str(db_path),
+                    "payload_ids": [built_payloads["data"]["items"][0]["payload_id"]],
+                    "auto_revise": True,
+                    "revision_profile_name": "zhihu_tight_hook",
+                    "revision_modes": ["remove_ai_phrases", "compress_exposition"],
+                    "revision_max_rounds": 2,
+                    "revision_max_spans_per_round": 2,
+                },
+            }
+        )
+    )
+    draft_id = built_drafts["data"]["items"][0]["draft_id"]
+    payload_id = built_payloads["data"]["items"][0]["payload_id"]
+    listed_drafts = parse_stdout_json(
+        run_cli(
+            {
+                "action": "list_story_drafts",
+                "payload": {
+                    "db_path": str(db_path),
+                    "payload_ids": [payload_id],
+                },
+            }
+        )
+    )
+    analyses = parse_stdout_json(
+        run_cli(
+            {
+                "action": "list_story_draft_analyses",
+                "payload": {
+                    "db_path": str(db_path),
+                    "draft_ids": [draft_id],
+                },
+            }
+        )
+    )
+    revisions = parse_stdout_json(
+        run_cli(
+            {
+                "action": "list_story_draft_revisions",
+                "payload": {
+                    "db_path": str(db_path),
+                    "draft_ids": [draft_id],
+                },
+            }
+        )
+    )
+
+    assert built_drafts["ok"] is True
+    assert built_drafts["data"]["auto_revise"] is True
+    assert built_drafts["data"]["items"][0]["auto_revised"] is True
+    assert built_drafts["data"]["items"][0]["revision_round_count"] >= 1
+    assert built_drafts["data"]["items"][0]["content_changed"] is True
+    assert built_drafts["data"]["items"][0]["body_char_count_after_revision"] == listed_drafts["data"]["items"][0]["body_char_count"]
+    assert built_drafts["data"]["items"][0]["body_char_count_before_revision"] >= 1
+    assert isinstance(built_drafts["data"]["items"][0]["body_char_count_delta"], int)
+    assert built_drafts["data"]["items"][0]["initial_analysis_id"] is not None
+    assert built_drafts["data"]["items"][0]["final_analysis_id"] is not None
+    assert listed_drafts["data"]["count"] == 1
+    assert listed_drafts["data"]["items"][0]["draft_id"] == draft_id
+    assert listed_drafts["data"]["items"][0]["content_markdown"] == revisions["data"]["items"][0]["after_content_markdown"]
+    assert analyses["data"]["count"] >= 2
+    assert revisions["data"]["count"] >= 1
+
+
 def test_build_story_drafts_action_supports_llm_generation_mode(tmp_path: Path) -> None:
     db_path = tmp_path / "story_ideas.sqlite3"
     stored = parse_stdout_json(

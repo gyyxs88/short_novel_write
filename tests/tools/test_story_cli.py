@@ -119,6 +119,44 @@ def test_inspect_action_returns_combined_report() -> None:
     assert "quality" in response["data"]
 
 
+def test_analyze_story_prose_action_returns_prose_report() -> None:
+    request = {
+        "action": "analyze_story_prose",
+        "payload": {
+            "content": VALID_STORY,
+            "style": "zhihu",
+        },
+    }
+
+    result = run_cli(json.dumps(request, ensure_ascii=False))
+
+    assert result.returncode == 0
+    response = parse_stdout_json(result)
+    assert response["ok"] is True
+    assert response["data"]["analyzer_name"] == "prose_analyzer_v1"
+    assert response["data"]["stored"] is False
+    assert response["data"]["issue_count"] >= 0
+    assert response["data"]["metrics"]["chapter_count"] == 3
+
+
+def test_get_style_profile_action_returns_builtin_profile_without_db_record() -> None:
+    request = {
+        "action": "get_style_profile",
+        "payload": {
+            "profile_name": "zhihu_tight_hook",
+        },
+    }
+
+    result = run_cli(json.dumps(request, ensure_ascii=False))
+
+    assert result.returncode == 0
+    response = parse_stdout_json(result)
+    assert response["ok"] is True
+    assert response["data"]["builtin"] is True
+    assert response["data"]["stored"] is False
+    assert response["data"]["profile"]["style"] == "zhihu"
+
+
 def test_invalid_json_returns_invalid_json_error() -> None:
     result = run_cli("{")
 

@@ -13,6 +13,15 @@
 - `completion_tokens`
 - `total_tokens`
 
+如果样本启用了草稿自动修订，报告现在还会额外汇总：
+
+- `auto_revised_job_count`
+- `draft_changed_job_count`
+- `revision_round_count_total`
+- `revision_round_count_avg`
+- `selected_draft_body_char_delta_total`
+- `selected_draft_body_char_change_total`
+
 它的目标不是替代 `story_cli.py`，而是把原本零散的真实样本验收，收口成一条可重复执行的回归流程。
 
 ## 相关文件
@@ -152,8 +161,23 @@ $env:PYTHONDONTWRITEBYTECODE='1'
 - `failed_count`
 - `inspect_pass_rate`
 - `token_usage`
+- `auto_revised_job_count`
+- `draft_changed_job_count`
+- `revision_round_count_total`
+- `selected_draft_body_char_delta_total`
 
 它们决定这次回归整体有没有退化。
+
+建议这样理解：
+
+- `auto_revised_job_count`
+  这次有多少样本真的进入了自动修订链
+- `draft_changed_job_count`
+  自动修订后有多少样本的正文主记录真的发生了变化
+- `revision_round_count_total`
+  这次回归总共跑了多少轮局部修订
+- `selected_draft_body_char_delta_total`
+  所有终稿相对首稿的字数净变化，适合判断后处理总体是在扩写还是压缩
 
 ### 2. 按风格汇总
 
@@ -198,6 +222,24 @@ $env:PYTHONDONTWRITEBYTECODE='1'
 - 其他
 
 这能直接告诉后续调优该先打哪一层。
+
+### 5. 自动修订效果汇总
+
+如果当前回归目标是验收“去 AI 味”后处理，除了 pass/fail，还要重点看：
+
+- `auto_revised_job_count`
+- `draft_changed_job_count`
+- `revision_round_count_avg`
+- `selected_draft_body_char_change_total`
+
+一个很常见的异常信号是：
+
+- 自动修订 job 数不低，但 `draft_changed_job_count` 很低
+
+这通常说明：
+
+- 自动修订链路虽然被调用了
+- 但真正命中的可改 span 太少，或者改写器没有把改动落回主 draft
 
 ## 测试
 

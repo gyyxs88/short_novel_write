@@ -275,7 +275,7 @@ def test_build_llm_story_plans_retries_once_when_output_is_invalid_json() -> Non
         extra_headers: dict[str, str] | None = None,
     ) -> dict:
         call_count["value"] += 1
-        prompts.append(payload["messages"][1]["content"])
+        prompts.append(payload["messages"][1]["content"][0]["text"])
         if call_count["value"] == 1:
             content = '{"plans": ['
         else:

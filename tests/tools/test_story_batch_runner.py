@@ -10,7 +10,12 @@ from tools.story_batch_runner import (
     load_batch_jobs,
     run_batch_jobs,
 )
-from tools.story_regression_samples import GenerationRoute, RegressionSample
+from tools.story_regression_samples import (
+    DraftPostprocessConfig,
+    GenerationRoute,
+    RegressionSample,
+    build_default_draft_postprocess,
+)
 
 
 def build_sample(job_id: str, *, style: str = "zhihu") -> RegressionSample:
@@ -21,6 +26,7 @@ def build_sample(job_id: str, *, style: str = "zhihu") -> RegressionSample:
         idea_pack_route=GenerationRoute(),
         plan_route=GenerationRoute(),
         draft_route=GenerationRoute(),
+        draft_postprocess=build_default_draft_postprocess(style),
         target_char_range=(3000, 5000),
         target_chapter_count=4,
         candidate_count=2,
@@ -149,14 +155,28 @@ def build_fake_invoker():
         if action == "build_story_drafts":
             payload_id = payload["payload_ids"][0]
             prompt = payload_to_prompt[payload_id]
+            auto_revise = bool(payload.get("auto_revise", False))
             return build_success_response(
                 action,
                 {
                     "generation_mode": payload["generation_mode"],
                     "created_count": 1,
                     "existing_count": 0,
+                    "auto_revise": auto_revise,
+                    "auto_revised_count": 1 if auto_revise else 0,
                     "token_usage": {"prompt_tokens": 40, "completion_tokens": 60, "total_tokens": 100},
-                    "items": [{"draft_id": payload_id * 10 + 1, "prompt": prompt}],
+                    "items": [
+                        {
+                            "draft_id": payload_id * 10 + 1,
+                            "prompt": prompt,
+                            "auto_revised": auto_revise,
+                            "revision_round_count": 1 if auto_revise else 0,
+                            "content_changed": auto_revise,
+                            "body_char_count_before_revision": 6100,
+                            "body_char_count_after_revision": 6200,
+                            "body_char_count_delta": 100 if auto_revise else 0,
+                        }
+                    ],
                 },
             )
 
@@ -252,6 +272,34 @@ def test_load_batch_jobs_accepts_utf8_bom_json(tmp_path: Path) -> None:
 
     assert len(jobs) == 1
     assert jobs[0].sample_key == "job-bom"
+    assert jobs[0].draft_postprocess.auto_revise is True
+    assert jobs[0].draft_postprocess.revision_profile_name == "zhihu_tight_hook"
+
+
+def test_load_batch_jobs_can_disable_draft_postprocess(tmp_path: Path) -> None:
+    job_file_path = tmp_path / "jobs_disable_postprocess.json"
+    job_file_path.write_text(
+        json.dumps(
+            [
+                {
+                    "job_id": "job-no-revise",
+                    "style": "douban",
+                    "prompt": "prompt-disable",
+                    "draft_postprocess": {
+                        "auto_revise": False,
+                    },
+                }
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    jobs = load_batch_jobs(job_file_path)
+
+    assert len(jobs) == 1
+    assert jobs[0].draft_postprocess == DraftPostprocessConfig(auto_revise=False)
 
 
 def test_load_batch_jobs_rejects_invalid_plan_count_early(tmp_path: Path) -> None:
@@ -320,6 +368,12 @@ def test_run_batch_jobs_archives_serially_and_writes_reports(tmp_path: Path) -> 
     assert report["summary"]["passed_count"] == 2
     assert report["summary"]["archived_count"] == 2
     assert report["summary"]["archive_failed_count"] == 0
+    assert report["summary"]["auto_revised_job_count"] == 2
+    assert report["summary"]["draft_changed_job_count"] == 2
+    assert report["summary"]["revision_round_count_total"] == 2
+    assert report["summary"]["revision_round_count_avg"] == 1.0
+    assert report["summary"]["selected_draft_body_char_delta_total"] == 200
+    assert report["summary"]["selected_draft_body_char_change_total"] == 200
     assert report["summary"]["token_usage"] == {
         "prompt_tokens": 140,
         "completion_tokens": 190,
@@ -335,3 +389,9 @@ def test_run_batch_jobs_archives_serially_and_writes_reports(tmp_path: Path) -> 
     assert Path(first_job["report_markdown_path"]).exists() is True
     assert first_job["archive"]["status"] == "archived"
     assert first_job["archive"]["source_db_deleted"] is True
+    assert first_job["selected_draft"]["auto_revised"] is True
+    assert first_job["selected_draft"]["revision_round_count"] == 1
+    assert first_job["selected_draft"]["content_changed"] is True
+    assert first_job["selected_draft"]["body_char_count_before_revision"] == 6100
+    assert first_job["selected_draft"]["body_char_count_after_revision"] == 6200
+    assert first_job["selected_draft"]["body_char_count_delta"] == 100

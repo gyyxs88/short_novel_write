@@ -48,6 +48,8 @@ def test_repository_initializes_expected_tables(tmp_path: Path) -> None:
         "story_plans",
         "story_payloads",
         "story_drafts",
+        "story_draft_analyses",
+        "story_draft_revisions",
     }
 
 
@@ -572,6 +574,393 @@ def test_upsert_story_payload_and_story_draft_flow(tmp_path: Path) -> None:
     )
     assert updated["draft_status"] == "selected"
     assert updated["review_note"] == "这版正文可以继续精修"
+
+    revised = repo.update_story_draft_content(
+        draft_id=draft["draft_id"],
+        title="短信背后的真相",
+        content_markdown="# 短信背后的真相\n\n## 简介\n\n一句更完整的简介。\n\n## 正文\n\n### 1\n\n修订后的第一章正文。",
+        summary_text="一句更完整的简介。",
+        body_char_count=9,
+    )
+    assert revised["draft_id"] == draft["draft_id"]
+    assert revised["summary_text"] == "一句更完整的简介。"
+    assert "修订后的第一章正文" in revised["content_markdown"]
+    assert revised["body_char_count"] == 9
+
+
+def test_create_and_list_story_draft_analyses(tmp_path: Path) -> None:
+    repo = StoryIdeaRepository(tmp_path / "story_ideas.sqlite3")
+    stored = repo.store_idea_cards(
+        source_mode="seed_generate",
+        seed="seed-a",
+        items=[
+            make_card(
+                ["Mystery - 悬疑 / 推理", "Modern - 现代"],
+                ["Missing Person - 失踪", "First Love - 初恋", "Secret Past - 隐秘过去"],
+            )
+        ],
+    )
+    card_id = stored["items"][0]["card_id"]
+    pack = repo.upsert_idea_pack(
+        card_id=card_id,
+        source_mode="seed_generate",
+        style="zhihu",
+        generation_mode="deterministic",
+        style_reason="更适合强钩子、强冲突的知乎式整理。",
+        hook="她在婚礼前夜收到一条来自失踪前任的短信，内容只有一句：别嫁给他。",
+        core_relationship="女主与失踪前任、现任未婚夫之间重新形成对立关系。",
+        main_conflict="她必须在婚礼开始前查清前任失踪和未婚夫家族的关系，否则自己会成为下一个被灭口的人。",
+        reversal_direction="她以为前任是来破坏婚礼，真正的反转却是未婚夫才是当年失踪案的操盘者。",
+        recommended_tags=["悬疑", "婚礼危机", "前任回潮"],
+        source_cards={
+            "types": ["Modern - 现代", "Mystery - 悬疑 / 推理"],
+            "main_tags": [
+                "First Love - 初恋",
+                "Missing Person - 失踪",
+                "Secret Past - 隐秘过去",
+            ],
+        },
+    )
+    plan = repo.upsert_story_plan(
+        pack_id=pack["pack_id"],
+        source_mode="seed_generate",
+        style="zhihu",
+        variant_index=1,
+        variant_key="truth_hunt",
+        variant_label="真相追猎型",
+        generation_mode="deterministic",
+        title="短信背后的真相",
+        genre_tone="现代悬疑反转，快节奏推进。",
+        selling_point="用婚礼倒计时压迫感推动真相翻面。",
+        protagonist_profile="一个被短信重新拖回旧局、不得不亲手拆解真相的人。",
+        protagonist_goal="查清短信和失踪案背后的操盘逻辑。",
+        core_relationship="女主与失踪前任、现任未婚夫形成三角对峙。",
+        main_conflict="她必须在婚礼开始前查清真相，否则自己会先成为被灭口的人。",
+        key_turning_point="她发现最关键的短信其实是有人故意递到她手里的诱饵。",
+        ending_direction="主角公开真相，但必须亲手切断一段再也回不去的关系。",
+        chapter_rhythm=[
+            {
+                "chapter_number": 1,
+                "stage": "异常闯入",
+                "focus": "短信到来",
+                "advance": "主角被迫回头追查",
+                "chapter_hook": "她意识到这条短信不是恶作剧。",
+            }
+        ],
+        writing_brief={
+            "title": "短信背后的真相",
+            "genre_tone": "现代悬疑反转，快节奏推进。",
+            "target_char_range": [5000, 8000],
+            "target_chapter_count": 1,
+            "protagonist_profile": "一个被短信重新拖回旧局、不得不亲手拆解真相的人。",
+            "protagonist_goal": "查清短信和失踪案背后的操盘逻辑。",
+            "core_relationship": "女主与失踪前任、现任未婚夫形成三角对峙。",
+            "main_conflict": "她必须在婚礼开始前查清真相，否则自己会先成为被灭口的人。",
+            "key_turning_point": "她发现最关键的短信其实是有人故意递到她手里的诱饵。",
+            "ending_direction": "主角公开真相，但必须亲手切断一段再也回不去的关系。",
+        },
+    )
+    payload = repo.upsert_story_payload(
+        plan_id=plan["plan_id"],
+        title="短信背后的真相",
+        style="zhihu",
+        target_char_range=[5000, 8000],
+        target_chapter_count=1,
+        payload={
+            "plan_id": plan["plan_id"],
+            "style": "zhihu",
+            "title": "短信背后的真相",
+            "genre_tone": "现代悬疑反转，快节奏推进。",
+            "selling_point": "用婚礼倒计时压迫感推动真相翻面。",
+            "target_char_range": [5000, 8000],
+            "target_chapter_count": 1,
+            "protagonist_profile": "一个被短信重新拖回旧局、不得不亲手拆解真相的人。",
+            "protagonist_goal": "查清短信和失踪案背后的操盘逻辑。",
+            "core_relationship": "女主与失踪前任、现任未婚夫形成三角对峙。",
+            "main_conflict": "她必须在婚礼开始前查清真相，否则自己会先成为被灭口的人。",
+            "key_turning_point": "她发现最关键的短信其实是有人故意递到她手里的诱饵。",
+            "ending_direction": "主角公开真相，但必须亲手切断一段再也回不去的关系。",
+            "summary_guidance": "先抛出危险和倒计时。",
+            "chapter_blueprints": [
+                {
+                    "chapter_number": 1,
+                    "stage": "异常闯入",
+                    "focus": "短信到来",
+                    "advance": "主角被迫回头追查",
+                    "chapter_hook": "她意识到这条短信不是恶作剧。",
+                    "objective": "把主角拖入危机。",
+                    "tension": "强化风险和倒计时。",
+                }
+            ],
+        },
+    )
+    draft = repo.upsert_story_draft(
+        payload_id=payload["payload_id"],
+        generation_mode="deterministic",
+        title="短信背后的真相",
+        content_markdown="# 短信背后的真相\n\n## 简介\n\n一句简介。\n\n## 正文\n\n### 1\n\n她知道事情正在失控。她感到痛苦，也感到不安。",
+        summary_text="一句简介。",
+        body_char_count=22,
+    )
+
+    analysis = repo.create_story_draft_analysis(
+        draft_id=draft["draft_id"],
+        analyzer_name="prose_analyzer_v1",
+        style="zhihu",
+        profile_name="zhihu_tight_hook",
+        overall_score=62,
+        dimension_scores={
+            "repeated_phrase": 70,
+            "repeated_paragraph_opener": 75,
+            "ai_ism": 65,
+            "abstract_emotion": 60,
+            "scene_thin": 50,
+            "template_chapter": 80,
+        },
+        issue_count=3,
+        analysis_report={
+            "overall_score": 62,
+            "issue_count": 3,
+            "issues": [
+                {"issue_code": "ai_ism"},
+                {"issue_code": "abstract_emotion"},
+                {"issue_code": "scene_thin"},
+            ],
+        },
+    )
+
+    fetched_draft = repo.get_story_draft(draft_id=draft["draft_id"])
+    listed = repo.list_story_draft_analyses(batch_id=stored["batch_id"])
+
+    assert fetched_draft["draft_id"] == draft["draft_id"]
+    assert analysis["draft_id"] == draft["draft_id"]
+    assert analysis["overall_score"] == 62
+    assert analysis["draft"]["payload_style"] == "zhihu"
+    assert listed[0]["analysis_id"] == analysis["analysis_id"]
+    assert listed[0]["profile_name"] == "zhihu_tight_hook"
+
+
+def test_upsert_get_and_list_story_style_profiles(tmp_path: Path) -> None:
+    repo = StoryIdeaRepository(tmp_path / "story_ideas.sqlite3")
+
+    created = repo.upsert_story_style_profile(
+        profile_name="sample_douban",
+        source_type="sample_texts",
+        style="douban",
+        profile={
+            "profile_name": "sample_douban",
+            "source_type": "sample_texts",
+            "style": "douban",
+            "voice_summary": "句子偏长，场景和停顿更显眼。",
+            "preferred_traits": ["先写场景，再让情绪浮出来。"],
+            "avoid_phrases": ["那一刻", "其实"],
+            "dialogue_rules": ["对话允许留白。"],
+            "narration_rules": ["少直接下判断。"],
+            "scene_rules": ["场景细节要准。"],
+            "sentence_rhythm_rules": ["长短句交替。"],
+            "sample_metrics": {"sample_count": 2},
+        },
+    )
+    updated = repo.upsert_story_style_profile(
+        profile_name="sample_douban",
+        source_type="sample_texts",
+        style="douban",
+        profile={
+            "profile_name": "sample_douban",
+            "source_type": "sample_texts",
+            "style": "douban",
+            "voice_summary": "句子偏长，场景更细。",
+            "preferred_traits": ["先写场景，再让情绪浮出来。", "关系变化落在动作里。"],
+            "avoid_phrases": ["那一刻", "其实"],
+            "dialogue_rules": ["对话允许留白。"],
+            "narration_rules": ["少直接下判断。"],
+            "scene_rules": ["场景细节要准。"],
+            "sentence_rhythm_rules": ["长短句交替。"],
+            "sample_metrics": {"sample_count": 3},
+        },
+    )
+    fetched = repo.get_story_style_profile(profile_name="sample_douban")
+    listed = repo.list_story_style_profiles(style="douban", source_type="sample_texts")
+
+    assert created["status"] == "created"
+    assert updated["status"] == "updated"
+    assert fetched["profile_name"] == "sample_douban"
+    assert fetched["profile"]["sample_metrics"]["sample_count"] == 3
+    assert listed[0]["profile_name"] == "sample_douban"
+
+
+def test_create_and_list_story_draft_revisions(tmp_path: Path) -> None:
+    repo = StoryIdeaRepository(tmp_path / "story_ideas.sqlite3")
+    stored = repo.store_idea_cards(
+        source_mode="seed_generate",
+        seed="seed-a",
+        items=[
+            make_card(
+                ["Mystery - 悬疑 / 推理", "Modern - 现代"],
+                ["Missing Person - 失踪", "First Love - 初恋", "Secret Past - 隐秘过去"],
+            )
+        ],
+    )
+    card_id = stored["items"][0]["card_id"]
+    pack = repo.upsert_idea_pack(
+        card_id=card_id,
+        source_mode="seed_generate",
+        style="zhihu",
+        generation_mode="deterministic",
+        style_reason="更适合强钩子、强冲突的知乎式整理。",
+        hook="她在婚礼前夜收到一条来自失踪前任的短信，内容只有一句：别嫁给他。",
+        core_relationship="女主与失踪前任、现任未婚夫之间重新形成对立关系。",
+        main_conflict="她必须在婚礼开始前查清前任失踪和未婚夫家族的关系，否则自己会成为下一个被灭口的人。",
+        reversal_direction="她以为前任是来破坏婚礼，真正的反转却是未婚夫才是当年失踪案的操盘者。",
+        recommended_tags=["悬疑", "婚礼危机", "前任回潮"],
+        source_cards={
+            "types": ["Modern - 现代", "Mystery - 悬疑 / 推理"],
+            "main_tags": [
+                "First Love - 初恋",
+                "Missing Person - 失踪",
+                "Secret Past - 隐秘过去",
+            ],
+        },
+    )
+    plan = repo.upsert_story_plan(
+        pack_id=pack["pack_id"],
+        source_mode="seed_generate",
+        style="zhihu",
+        variant_index=1,
+        variant_key="truth_hunt",
+        variant_label="真相追猎型",
+        generation_mode="deterministic",
+        title="短信背后的真相",
+        genre_tone="现代悬疑反转，快节奏推进。",
+        selling_point="用婚礼倒计时压迫感推动真相翻面。",
+        protagonist_profile="一个被短信重新拖回旧局、不得不亲手拆解真相的人。",
+        protagonist_goal="查清短信和失踪案背后的操盘逻辑。",
+        core_relationship="女主与失踪前任、现任未婚夫形成三角对峙。",
+        main_conflict="她必须在婚礼开始前查清真相，否则自己会先成为被灭口的人。",
+        key_turning_point="她发现最关键的短信其实是有人故意递到她手里的诱饵。",
+        ending_direction="主角公开真相，但必须亲手切断一段再也回不去的关系。",
+        chapter_rhythm=[
+            {
+                "chapter_number": 1,
+                "stage": "异常闯入",
+                "focus": "短信到来",
+                "advance": "主角被迫回头追查",
+                "chapter_hook": "她意识到这条短信不是恶作剧。",
+            }
+        ],
+        writing_brief={
+            "title": "短信背后的真相",
+            "genre_tone": "现代悬疑反转，快节奏推进。",
+            "target_char_range": [5000, 8000],
+            "target_chapter_count": 1,
+            "protagonist_profile": "一个被短信重新拖回旧局、不得不亲手拆解真相的人。",
+            "protagonist_goal": "查清短信和失踪案背后的操盘逻辑。",
+            "core_relationship": "女主与失踪前任、现任未婚夫形成三角对峙。",
+            "main_conflict": "她必须在婚礼开始前查清真相，否则自己会先成为被灭口的人。",
+            "key_turning_point": "她发现最关键的短信其实是有人故意递到她手里的诱饵。",
+            "ending_direction": "主角公开真相，但必须亲手切断一段再也回不去的关系。",
+        },
+    )
+    payload = repo.upsert_story_payload(
+        plan_id=plan["plan_id"],
+        title="短信背后的真相",
+        style="zhihu",
+        target_char_range=[5000, 8000],
+        target_chapter_count=1,
+        payload={
+            "plan_id": plan["plan_id"],
+            "style": "zhihu",
+            "title": "短信背后的真相",
+            "genre_tone": "现代悬疑反转，快节奏推进。",
+            "selling_point": "用婚礼倒计时压迫感推动真相翻面。",
+            "target_char_range": [5000, 8000],
+            "target_chapter_count": 1,
+            "protagonist_profile": "一个被短信重新拖回旧局、不得不亲手拆解真相的人。",
+            "protagonist_goal": "查清短信和失踪案背后的操盘逻辑。",
+            "core_relationship": "女主与失踪前任、现任未婚夫形成三角对峙。",
+            "main_conflict": "她必须在婚礼开始前查清真相，否则自己会先成为被灭口的人。",
+            "key_turning_point": "她发现最关键的短信其实是有人故意递到她手里的诱饵。",
+            "ending_direction": "主角公开真相，但必须亲手切断一段再也回不去的关系。",
+            "summary_guidance": "先抛出危险和倒计时。",
+            "chapter_blueprints": [
+                {
+                    "chapter_number": 1,
+                    "stage": "异常闯入",
+                    "focus": "短信到来",
+                    "advance": "主角被迫回头追查",
+                    "chapter_hook": "她意识到这条短信不是恶作剧。",
+                    "objective": "把主角拖入危机。",
+                    "tension": "强化风险和倒计时。",
+                }
+            ],
+        },
+    )
+    draft = repo.upsert_story_draft(
+        payload_id=payload["payload_id"],
+        generation_mode="deterministic",
+        title="短信背后的真相",
+        content_markdown="# 短信背后的真相\n\n## 简介\n\n一句简介。\n\n## 正文\n\n### 1\n\n她知道事情正在失控。那一刻她感到不安。",
+        summary_text="一句简介。",
+        body_char_count=20,
+    )
+    analysis = repo.create_story_draft_analysis(
+        draft_id=draft["draft_id"],
+        analyzer_name="prose_analyzer_v1",
+        style="zhihu",
+        profile_name="zhihu_tight_hook",
+        overall_score=60,
+        dimension_scores={"ai_ism": 60},
+        issue_count=1,
+        analysis_report={
+            "issues": [
+                {
+                    "issue_code": "ai_ism",
+                    "severity": "high",
+                    "chapter_number": 1,
+                    "span_text": "那一刻她感到不安。",
+                    "start_offset": 33,
+                    "end_offset": 42,
+                    "evidence": {"phrase": "那一刻"},
+                }
+            ]
+        },
+    )
+
+    revision = repo.create_story_draft_revision(
+        draft_id=draft["draft_id"],
+        analysis_id=analysis["analysis_id"],
+        generation_mode="deterministic",
+        revision_modes=["remove_ai_phrases"],
+        before_content_markdown=draft["content_markdown"],
+        after_content_markdown="# 短信背后的真相\n\n## 简介\n\n一句简介。\n\n## 正文\n\n### 1\n\n她知道事情正在失控。她感到不安。",
+        changed_spans=[
+            {
+                "issue_code": "ai_ism",
+                "original_text": "那一刻她感到不安。",
+                "rewritten_text": "她感到不安。",
+            }
+        ],
+        revision_summary="本次共改写 1 个片段，处理问题：ai_ism；应用方式：remove_ai_phrases。",
+        review_metadata={
+            "risk_alert_count": 0,
+            "llm_judge": {
+                "model_name": "mock-judge",
+                "accepted_candidate_count": 1,
+            },
+        },
+    )
+
+    latest_analysis = repo.get_latest_story_draft_analysis(draft_id=draft["draft_id"])
+    fetched_analysis = repo.get_story_draft_analysis(analysis_id=analysis["analysis_id"])
+    listed = repo.list_story_draft_revisions(draft_ids=[draft["draft_id"]])
+
+    assert latest_analysis["analysis_id"] == analysis["analysis_id"]
+    assert fetched_analysis["analysis_id"] == analysis["analysis_id"]
+    assert revision["draft_id"] == draft["draft_id"]
+    assert revision["review_metadata"]["llm_judge"]["model_name"] == "mock-judge"
+    assert listed[0]["revision_id"] == revision["revision_id"]
+    assert listed[0]["revision_modes"] == ["remove_ai_phrases"]
+    assert listed[0]["review_metadata"]["llm_judge"]["accepted_candidate_count"] == 1
 
 
 def test_get_cards_for_build_with_card_ids_keeps_source_mode(tmp_path: Path) -> None:

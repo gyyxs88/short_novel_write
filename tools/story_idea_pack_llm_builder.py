@@ -282,6 +282,12 @@ def build_responses_payload(
     }
 
 
+def build_chat_message_content(text: str) -> list[dict[str, str]]:
+    if not isinstance(text, str) or not text.strip():
+        raise LlmConfigError("chat message content 必须是非空字符串。")
+    return [{"type": "text", "text": text}]
+
+
 def build_chat_completions_payload(
     *,
     style: str,
@@ -295,7 +301,7 @@ def build_chat_completions_payload(
         "messages": [
             {
                 "role": "system",
-                "content": (
+                "content": build_chat_message_content(
                     "你是中文短篇故事创意编辑。"
                     "你必须只返回一个 JSON 对象，不要返回 Markdown 代码块，不要解释，不要补充说明。"
                     "固定字段必须是：style_reason、hook、core_relationship、main_conflict、reversal_direction、recommended_tags。"
@@ -304,7 +310,7 @@ def build_chat_completions_payload(
             },
             {
                 "role": "user",
-                "content": (
+                "content": build_chat_message_content(
                     f"{prompt}\n"
                     "请只返回一个 JSON 对象，格式示例："
                     '{"style_reason":"...","hook":"...","core_relationship":"...","main_conflict":"...","reversal_direction":"...","recommended_tags":["...","...","..."]}'
@@ -327,7 +333,7 @@ def build_provider_chat_completions_options(
     options: dict[str, Any] = {}
     if stream:
         options["stream"] = True
-        if normalized_route["provider_name"] in {"openai", "openrouter"}:
+        if normalized_route["provider_name"] != "deepseek":
             options["stream_options"] = {"include_usage": True}
     if normalized_route["provider_name"] == "deepseek":
         options["response_format"] = {"type": "json_object"}
@@ -455,7 +461,7 @@ def post_json_api(
 ) -> dict[str, Any]:
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json; charset=utf-8",
+        "Content-Type": "application/json",
     }
     if extra_headers:
         headers.update(extra_headers)
@@ -541,6 +547,17 @@ def extract_chat_output_text(response_payload: dict[str, Any]) -> str:
     content = message.get("content")
     if isinstance(content, str) and content.strip():
         return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if isinstance(text, str) and text:
+                parts.append(text)
+        combined = "".join(parts).strip()
+        if combined:
+            return combined
     raise LlmResponseError("无法从 chat/completions 响应中提取文本内容。")
 
 
@@ -742,6 +759,7 @@ def build_llm_idea_pack_from_route(
             build_provider_chat_completions_options(
                 route=normalized_route,
                 max_tokens=1200,
+                stream=True,
             )
         )
 

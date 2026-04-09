@@ -62,6 +62,7 @@ def build_route_summary(sample: RegressionSample) -> dict[str, Any]:
         "idea_pack": sample.idea_pack_route.to_action_payload(),
         "plan": sample.plan_route.to_action_payload(),
         "draft": sample.draft_route.to_action_payload(),
+        "draft_postprocess": sample.draft_postprocess.to_action_payload(),
     }
 
 
@@ -85,6 +86,13 @@ def summarize_action_data(action: str, data: dict[str, Any]) -> dict[str, Any]:
             "existing_count": data.get("existing_count"),
             "item_count": len(data.get("items", [])),
         }
+        if action == "build_story_drafts":
+            summary["auto_revise"] = bool(data.get("auto_revise", False))
+            summary["auto_revised_count"] = int(data.get("auto_revised_count", 0) or 0)
+            summary["draft_changed_count"] = int(data.get("draft_changed_count", 0) or 0)
+            summary["revision_round_count_total"] = int(data.get("revision_round_count_total", 0) or 0)
+            summary["body_char_delta_total"] = int(data.get("body_char_delta_total", 0) or 0)
+            summary["body_char_change_total"] = int(data.get("body_char_change_total", 0) or 0)
         token_usage = normalize_token_usage(data.get("token_usage", {}))
         if has_token_usage(token_usage):
             summary["token_usage"] = token_usage
@@ -291,6 +299,54 @@ def find_selected_draft(drafts: list[dict[str, Any]], payload_id: int, generatio
         if item.get("payload_id") == payload_id and item.get("generation_mode") == generation_mode:
             return item
     raise ValueError(f"未找到 payload_id={payload_id} / generation_mode={generation_mode} 对应的草稿。")
+
+
+def find_built_draft_item(
+    draft_items: list[dict[str, Any]],
+    *,
+    draft_id: Any,
+    payload_id: Any,
+) -> dict[str, Any]:
+    for item in draft_items:
+        if item.get("draft_id") == draft_id:
+            return item
+    for item in draft_items:
+        if item.get("payload_id") == payload_id:
+            return item
+    return draft_items[0] if draft_items else {}
+
+
+def build_selected_draft_metrics_summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
+    auto_revised_job_count = 0
+    draft_changed_job_count = 0
+    revision_round_count_total = 0
+    body_char_delta_total = 0
+    body_char_change_total = 0
+    for case in cases:
+        selected_draft = case.get("selected_draft", {})
+        if not isinstance(selected_draft, dict):
+            continue
+        if bool(selected_draft.get("auto_revised", False)):
+            auto_revised_job_count += 1
+        if bool(selected_draft.get("content_changed", False)):
+            draft_changed_job_count += 1
+        revision_round_count_total += int(selected_draft.get("revision_round_count", 0) or 0)
+        delta = int(selected_draft.get("body_char_count_delta", 0) or 0)
+        body_char_delta_total += delta
+        body_char_change_total += abs(delta)
+    revision_round_count_avg = (
+        round(revision_round_count_total / auto_revised_job_count, 4)
+        if auto_revised_job_count
+        else 0.0
+    )
+    return {
+        "auto_revised_job_count": auto_revised_job_count,
+        "draft_changed_job_count": draft_changed_job_count,
+        "revision_round_count_total": revision_round_count_total,
+        "revision_round_count_avg": revision_round_count_avg,
+        "selected_draft_body_char_delta_total": body_char_delta_total,
+        "selected_draft_body_char_change_total": body_char_change_total,
+    }
 
 
 def run_single_sample(
@@ -528,6 +584,7 @@ def run_single_sample(
             **shared_payload,
             "payload_ids": [selected_payload["payload_id"]],
             **sample.draft_route.to_action_payload(),
+            **sample.draft_postprocess.to_action_payload(),
         },
         invoke_action=invoke_action,
     )
@@ -565,10 +622,27 @@ def run_single_sample(
                 error={"code": "NO_SELECTED_DRAFT", "message": str(exc), "details": {}},
             )
         )
+    built_draft_item = find_built_draft_item(
+        built_drafts_data.get("items", []),
+        draft_id=selected_draft.get("draft_id"),
+        payload_id=selected_payload["payload_id"],
+    )
     sample_result["selected_draft"] = {
         "draft_id": selected_draft.get("draft_id"),
         "title": selected_draft.get("title"),
         "body_char_count": selected_draft.get("body_char_count"),
+        "auto_revised": bool(built_draft_item.get("auto_revised", False)),
+        "revision_round_count": int(built_draft_item.get("revision_round_count", 0) or 0),
+        "content_changed": bool(built_draft_item.get("content_changed", False)),
+        "body_char_count_before_revision": int(
+            built_draft_item.get("body_char_count_before_revision", selected_draft.get("body_char_count", 0))
+            or 0
+        ),
+        "body_char_count_after_revision": int(
+            built_draft_item.get("body_char_count_after_revision", selected_draft.get("body_char_count", 0))
+            or 0
+        ),
+        "body_char_count_delta": int(built_draft_item.get("body_char_count_delta", 0) or 0),
     }
 
     inspect_stage, inspect_data = call_action(
@@ -647,6 +721,7 @@ def build_report_summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
     total_token_usage = build_empty_token_usage()
     for case in cases:
         total_token_usage = merge_token_usages(total_token_usage, case.get("token_usage", {}))
+    selected_draft_metrics = build_selected_draft_metrics_summary(cases)
     return {
         "sample_count": len(cases),
         "passed_count": passed_count,
@@ -657,6 +732,7 @@ def build_report_summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
         "failure_type_counts": build_count_map(cases, "failure_type"),
         "all_passed": failed_count == 0,
         "token_usage": total_token_usage,
+        **selected_draft_metrics,
     }
 
 
@@ -673,6 +749,12 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         f"- 通过数量：`{report['summary']['passed_count']}`",
         f"- 失败数量：`{report['summary']['failed_count']}`",
         f"- inspect 通过率：`{report['summary']['inspect_pass_rate']}`",
+        f"- 自动修订 job 数：`{report['summary']['auto_revised_job_count']}`",
+        f"- 终稿发生变化的 job 数：`{report['summary']['draft_changed_job_count']}`",
+        f"- 修订总轮次：`{report['summary']['revision_round_count_total']}`",
+        f"- 平均修订轮次：`{report['summary']['revision_round_count_avg']}`",
+        f"- 终稿字数净变化：`{report['summary']['selected_draft_body_char_delta_total']}`",
+        f"- 首终稿字数变化总量：`{report['summary']['selected_draft_body_char_change_total']}`",
         f"- prompt tokens：`{report['summary']['token_usage']['prompt_tokens']}`",
         f"- completion tokens：`{report['summary']['token_usage']['completion_tokens']}`",
         f"- total tokens：`{report['summary']['token_usage']['total_tokens']}`",
@@ -703,7 +785,7 @@ def render_markdown_report(report: dict[str, Any]) -> str:
                 f"- 状态：`{case['status']}`",
                 f"- 风格：`{case['style']}`",
                 f"- prompt：{case['prompt']}",
-                f"- 路线：pack `{case['route']['idea_pack']}` / plan `{case['route']['plan']}` / draft `{case['route']['draft']}`",
+                f"- 路线：pack `{case['route']['idea_pack']}` / plan `{case['route']['plan']}` / draft `{case['route']['draft']}` / postprocess `{case['route']['draft_postprocess']}`",
                 f"- 选中创意包：`{case['selected_pack']}`",
                 f"- 选中方案：`{case['selected_plan']}`",
                 f"- 选中 payload：`{case['selected_payload']}`",

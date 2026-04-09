@@ -29,7 +29,12 @@ from tools.story_regression_runner import (
     run_single_sample,
     write_report_files,
 )
-from tools.story_regression_samples import GenerationRoute, RegressionSample
+from tools.story_regression_samples import (
+    DraftPostprocessConfig,
+    GenerationRoute,
+    RegressionSample,
+    build_default_draft_postprocess,
+)
 from tools.story_token_usage import build_empty_token_usage, merge_token_usages
 
 
@@ -62,6 +67,53 @@ def build_default_draft_route(style: str) -> GenerationRoute:
     if style == "zhihu":
         return GenerationRoute(generation_mode="llm", llm_environment="zhihu_draft_default")
     return GenerationRoute(generation_mode="llm", llm_environment="douban_draft_default")
+
+
+def parse_draft_postprocess_definition(
+    raw_value: Any,
+    *,
+    default_config: DraftPostprocessConfig,
+    field_name: str,
+) -> DraftPostprocessConfig:
+    if raw_value is None:
+        return default_config
+    if not isinstance(raw_value, dict):
+        raise ValueError(f"{field_name} 必须是对象。")
+
+    resolved_auto_revise = raw_value.get("auto_revise", default_config.auto_revise)
+    if not isinstance(resolved_auto_revise, bool):
+        raise ValueError(f"{field_name}.auto_revise 必须是布尔值。")
+    if not resolved_auto_revise:
+        try:
+            return DraftPostprocessConfig(auto_revise=False)
+        except ValueError as exc:  # pragma: no cover
+            raise ValueError(f"{field_name} 不合法：{exc}") from exc
+
+    try:
+        return DraftPostprocessConfig(
+            auto_revise=True,
+            revision_profile_name=raw_value.get(
+                "revision_profile_name",
+                default_config.revision_profile_name,
+            ),
+            revision_modes=tuple(
+                raw_value.get("revision_modes", default_config.revision_modes)
+            ),
+            revision_issue_codes=tuple(
+                raw_value.get("revision_issue_codes", default_config.revision_issue_codes)
+            ),
+            revision_max_rounds=int(
+                raw_value.get("revision_max_rounds", default_config.revision_max_rounds)
+            ),
+            revision_max_spans_per_round=int(
+                raw_value.get(
+                    "revision_max_spans_per_round",
+                    default_config.revision_max_spans_per_round,
+                )
+            ),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} 不合法：{exc}") from exc
 
 
 def parse_route_definition(
@@ -154,6 +206,11 @@ def build_job_sample(raw_job: dict[str, Any], *, index: int) -> RegressionSample
         default_route=default_draft_route,
         field_name=f"job_id={job_id}.draft_route",
     )
+    draft_postprocess = parse_draft_postprocess_definition(
+        raw_job.get("draft_postprocess"),
+        default_config=build_default_draft_postprocess(style.strip()),
+        field_name=f"job_id={job_id}.draft_postprocess",
+    )
 
     try:
         normalized_target_chapter_count = normalize_story_target_chapter_count(
@@ -179,6 +236,7 @@ def build_job_sample(raw_job: dict[str, Any], *, index: int) -> RegressionSample
         idea_pack_route=idea_pack_route,
         plan_route=plan_route,
         draft_route=draft_route,
+        draft_postprocess=draft_postprocess,
         notes=notes.strip(),
         tags=tuple(item.strip() for item in raw_tags if item.strip()),
     )
@@ -248,6 +306,7 @@ def build_unexpected_failure_case(sample: RegressionSample, message: str) -> dic
             "idea_pack": sample.idea_pack_route.to_action_payload(),
             "plan": sample.plan_route.to_action_payload(),
             "draft": sample.draft_route.to_action_payload(),
+            "draft_postprocess": sample.draft_postprocess.to_action_payload(),
         },
         "target_char_range": list(sample.target_char_range),
         "target_chapter_count": sample.target_chapter_count,
@@ -367,15 +426,9 @@ def build_batch_summary(job_results: list[dict[str, Any]], *, wall_time_seconds:
     failed_count = len(job_results) - passed_count
     archived_count = sum(1 for item in job_results if item["archive"]["status"] == "archived")
     archive_failed_count = sum(1 for item in job_results if item["archive"]["status"] == "failed")
-
-    final_stage_counts: dict[str, int] = {}
-    failure_type_counts: dict[str, int] = {}
-    for item in job_results:
-        if item["status"] != "passed":
-            final_stage = item.get("final_stage", "") or "unknown"
-            failure_type = item.get("failure_type", "") or "unknown"
-            final_stage_counts[final_stage] = final_stage_counts.get(final_stage, 0) + 1
-            failure_type_counts[failure_type] = failure_type_counts.get(failure_type, 0) + 1
+    case_summary = build_report_summary(
+        [item["case"] for item in job_results if isinstance(item.get("case"), dict)]
+    )
 
     return {
         "job_count": len(job_results),
@@ -387,8 +440,14 @@ def build_batch_summary(job_results: list[dict[str, Any]], *, wall_time_seconds:
         "all_passed": failed_count == 0,
         "all_archived": archived_count == len(job_results) and archive_failed_count == 0,
         "token_usage": merge_batch_token_usage(job_results),
-        "final_stage_counts": final_stage_counts,
-        "failure_type_counts": failure_type_counts,
+        "final_stage_counts": case_summary["stage_failure_counts"],
+        "failure_type_counts": case_summary["failure_type_counts"],
+        "auto_revised_job_count": case_summary["auto_revised_job_count"],
+        "draft_changed_job_count": case_summary["draft_changed_job_count"],
+        "revision_round_count_total": case_summary["revision_round_count_total"],
+        "revision_round_count_avg": case_summary["revision_round_count_avg"],
+        "selected_draft_body_char_delta_total": case_summary["selected_draft_body_char_delta_total"],
+        "selected_draft_body_char_change_total": case_summary["selected_draft_body_char_change_total"],
         "wall_time_seconds": round(wall_time_seconds, 3),
     }
 
@@ -408,6 +467,12 @@ def render_batch_markdown_report(report: dict[str, Any]) -> str:
         f"- 失败数量：`{report['summary']['failed_count']}`",
         f"- 已归档数量：`{report['summary']['archived_count']}`",
         f"- 归档失败数量：`{report['summary']['archive_failed_count']}`",
+        f"- 自动修订 job 数：`{report['summary']['auto_revised_job_count']}`",
+        f"- 终稿发生变化的 job 数：`{report['summary']['draft_changed_job_count']}`",
+        f"- 修订总轮次：`{report['summary']['revision_round_count_total']}`",
+        f"- 平均修订轮次：`{report['summary']['revision_round_count_avg']}`",
+        f"- 终稿字数净变化：`{report['summary']['selected_draft_body_char_delta_total']}`",
+        f"- 首终稿字数变化总量：`{report['summary']['selected_draft_body_char_change_total']}`",
         f"- 总耗时：`{report['summary']['wall_time_seconds']}` 秒",
         f"- prompt tokens：`{report['summary']['token_usage']['prompt_tokens']}`",
         f"- completion tokens：`{report['summary']['token_usage']['completion_tokens']}`",
@@ -415,15 +480,20 @@ def render_batch_markdown_report(report: dict[str, Any]) -> str:
         "",
         "## Job 明细",
         "",
-        "| job_id | style | status | final_stage | failure_type | archive | deleted | run_dir |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| job_id | style | status | auto_revised | changed | rounds | delta | final_stage | failure_type | archive | deleted | run_dir |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for item in report["jobs"]:
+        selected_draft = item.get("selected_draft", {})
         lines.append(
-            "| {job_id} | {style} | {status} | {final_stage} | {failure_type} | {archive_status} | {deleted} | `{run_dir}` |".format(
+            "| {job_id} | {style} | {status} | {auto_revised} | {changed} | {rounds} | {delta} | {final_stage} | {failure_type} | {archive_status} | {deleted} | `{run_dir}` |".format(
                 job_id=item["job_id"],
                 style=item["style"],
                 status=item["status"],
+                auto_revised="yes" if selected_draft.get("auto_revised") else "no",
+                changed="yes" if selected_draft.get("content_changed") else "no",
+                rounds=selected_draft.get("revision_round_count", 0),
+                delta=selected_draft.get("body_char_count_delta", 0),
                 final_stage=item["final_stage"] or "-",
                 failure_type=item["failure_type"] or "-",
                 archive_status=item["archive"]["status"],

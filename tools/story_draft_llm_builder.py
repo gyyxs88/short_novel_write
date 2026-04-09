@@ -13,6 +13,7 @@ from tools.story_idea_pack_llm_builder import (
     LlmResponseError,
     LlmTransportError,
     TransportFn,
+    build_chat_message_content,
     build_provider_chat_completions_options,
     build_direct_route_candidate,
     describe_route,
@@ -706,7 +707,7 @@ def build_story_draft_summary_chat_completions_payload(
         "messages": [
             {
                 "role": "system",
-                "content": (
+                "content": build_chat_message_content(
                     "你是中文短篇小说作者。"
                     "你必须只返回一个 JSON 对象，不要解释，不要返回 Markdown 代码块。"
                     "顶层字段固定为 summary。"
@@ -714,7 +715,7 @@ def build_story_draft_summary_chat_completions_payload(
             },
             {
                 "role": "user",
-                "content": (
+                "content": build_chat_message_content(
                     f"{prompt}\n"
                     '请只返回一个 JSON 对象，格式示例：{"summary":"..."}'
                 ),
@@ -780,7 +781,7 @@ def build_story_draft_chapter_chat_completions_payload(
         "messages": [
             {
                 "role": "system",
-                "content": (
+                "content": build_chat_message_content(
                     "你是中文短篇小说作者。"
                     "你必须只返回一个 JSON 对象，不要解释，不要返回 Markdown 代码块。"
                     "顶层字段固定为 chapter_number 和 content。"
@@ -788,7 +789,7 @@ def build_story_draft_chapter_chat_completions_payload(
             },
             {
                 "role": "user",
-                "content": (
+                "content": build_chat_message_content(
                     f"{prompt}\n"
                     f'请只返回一个 JSON 对象，格式示例：{{"chapter_number":{chapter_number},"content":"..."}}'
                 ),
@@ -842,7 +843,7 @@ def build_story_draft_chat_completions_payload(
         "messages": [
             {
                 "role": "system",
-                "content": (
+                "content": build_chat_message_content(
                     "你是中文短篇小说作者。"
                     "你必须只返回一个 JSON 对象，不要解释，不要返回 Markdown 代码块。"
                     "顶层字段固定为 summary 和 chapters。"
@@ -850,7 +851,7 @@ def build_story_draft_chat_completions_payload(
             },
             {
                 "role": "user",
-                "content": (
+                "content": build_chat_message_content(
                     f"{prompt}\n"
                     "请只返回一个 JSON 对象，格式示例："
                     '{"summary":"...","chapters":[{"chapter_number":1,"content":"..."},{"chapter_number":2,"content":"..."}]}'

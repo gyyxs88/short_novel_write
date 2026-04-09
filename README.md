@@ -43,11 +43,29 @@
 14. 批量任务并发调度
    通过 `tools/story_batch_runner.py` 从 jobs JSON 批量创建独立运行库，并发跑单 job 写作链，再用单线程归档 worker 串行写入 `archive.sqlite3`，适合多小说同时生成。
 15. 统一 CLI
-   通过 `tools/story_cli.py` 统一对外暴露 `generate_ideas`、`match_idea_cards`、`store_idea_cards`、`build_idea_packs`、`evaluate_idea_packs`、`build_story_plans`、`build_story_payloads`、`build_story_drafts`、`get_llm_config`、`export_llm_config`、`apply_llm_config`、`list_llm_providers`、`list_llm_models`、`list_llm_environments`、`get_llm_provider`、`get_llm_model`、`get_llm_environment`、`upsert_llm_provider`、`upsert_llm_model`、`upsert_llm_environment`、`delete_llm_provider`、`delete_llm_model`、`delete_llm_environment`、`list_idea_cards`、`list_idea_packs`、`list_idea_pack_evaluations`、`list_story_plans`、`list_story_payloads`、`list_story_drafts`、`update_idea_pack_status`、`update_story_plan_status`、`update_story_draft_status`、`archive_run`、`save`、`check_structure`、`check_quality`、`inspect` 三十七个动作。
+   通过 `tools/story_cli.py` 统一对外暴露 `generate_ideas`、`match_idea_cards`、`store_idea_cards`、`build_idea_packs`、`evaluate_idea_packs`、`build_story_plans`、`build_story_payloads`、`build_story_drafts`、`analyze_story_prose`、`build_style_profile`、`rewrite_story_spans`、`revise_story_draft`、`get_llm_config`、`export_llm_config`、`apply_llm_config`、`list_llm_providers`、`list_llm_models`、`list_llm_environments`、`get_llm_provider`、`get_llm_model`、`get_llm_environment`、`upsert_llm_provider`、`upsert_llm_model`、`upsert_llm_environment`、`delete_llm_provider`、`delete_llm_model`、`delete_llm_environment`、`list_idea_cards`、`list_idea_packs`、`list_idea_pack_evaluations`、`list_story_plans`、`list_story_payloads`、`list_story_drafts`、`list_story_draft_analyses`、`list_style_profiles`、`get_style_profile`、`list_story_draft_revisions`、`update_idea_pack_status`、`update_story_plan_status`、`update_story_draft_status`、`archive_run`、`save`、`check_structure`、`check_quality`、`inspect` 四十五个动作。
 16. Skill 调用约定
    `SKILL.md`、`references/workflow.md`、`references/quality-checklist.md` 已经接入 CLI 的收尾调用链。
 17. 真实样本回归与报告
    通过 `tools/story_regression_runner.py` 和 `tools/story_regression_samples.py` 批量跑真实样本链路，输出 JSON/Markdown 回归报告，统计阶段失败点、失败类型以及各阶段 token 消耗。
+18. 正文气味分析与结果落库
+   通过 `tools/story_prose_analyzer.py` 对正文做 deterministic 文本气味诊断，当前覆盖重复短语、段落起手重复、AI-ism、抽象情绪、场景稀薄和章节模板感，并可把分析结果落库到 `story_draft_analyses`。
+19. 风格画像构建与管理
+   通过 `tools/story_style_profile.py` 提供内置画像和样本文本画像两种入口，并支持把画像落库到 `story_style_profiles`，供后续正文分析和局部改写复用。
+20. 局部改写与修订记录落库
+   通过 `tools/story_span_rewriter.py` 基于分析结果和风格画像做 span 级 deterministic 改写，当前覆盖去 AI 腔、压解释、情绪具象化、补场景和打散模板节奏，并把修订结果落库到 `story_draft_revisions`。
+21. 修订编排闭环
+   通过 `tools/story_revision_runner.py` 串起“分析 -> 局部改写 -> 复检”流程，当前支持 deterministic 多轮修订，并复用 `story_draft_analyses` 和 `story_draft_revisions` 保留每轮轨迹；高风险 span 现已降级为 `risk_alerts` 提醒，可继续接入 `judge_llm_environment` 做 LLM 判定，并把待复核片段记成 `agent_review_required`。
+22. 生成链自动修订后处理
+   `build_story_drafts` 现已支持显式开启 `auto_revise`，在建稿后自动执行 `revise_story_draft` 同款修订流程，并把修订后的正文安全回写到 `story_drafts` 主记录，方便后续 `inspect / save` 直接消费。
+23. 回归样本与默认工作流接入自动修订
+   `story_regression_runner.py`、`story_regression_samples.py`、`SKILL.md` 和 `references/workflow.md` 现已接入草稿自动修订配置，真实样本回归和默认正文工作流都能统一走 `build_story_drafts(auto_revise) -> inspect` 这条链。
+24. 批量任务接入自动修订后处理
+   `story_batch_runner.py` 现已支持给 jobs 透传 `draft_postprocess`，并默认按风格启用自动修订后处理；批量 job 在未显式关闭时，也会统一走 `build_story_drafts(auto_revise) -> inspect -> archive`。
+25. 批量报告与归档修订指标增强
+   批量报告、单 job 回归报告和 `archive.sqlite3` 现已统一记录自动修订数量、修订轮次以及首稿/终稿的字数差异，方便批量比较“去 AI 味”后处理是否真的发生了变化。
+26. Windows CLI 编码兼容与 deterministic 自动修订稳定性补强
+   `tools/story_cli.py` 现在统一输出 ASCII-safe JSON，减少 Windows 默认编码对子进程解析的影响；同时 `story_prose_analyzer.py` 和 `story_span_rewriter.py` 已补齐长 span 定位与重叠 span 过滤，fresh SQLite 下可稳定跑通 `build_story_drafts(auto_revise) -> inspect`。
 
 重要说明：
 
@@ -73,10 +91,14 @@
 - 当前推荐的数据分层是：`template.sqlite3` 只放稳定配置，单次任务使用独立运行库，任务结束后再把业务数据写入统一 `archive.sqlite3`
 - `archive_run` 归档时会把选题链路、最终成品、阶段耗时和 token 统计一起落库；只有归档校验通过后才建议删除任务运行库
 - `story_batch_runner.py` 当前就是这套分层的批量执行入口：每个 job 独立运行库，并发生成，归档串行收口
+- `story_batch_runner.py` 现已默认复用风格化草稿后处理；如果某个批量 job 需要保留原始首稿，可在 jobs JSON 里显式传 `draft_postprocess.auto_revise=false`
+- `story_batch_runner.py` 和 `story_archive_manager.py` 现已把自动修订 job 数、修订轮次、终稿字数净变化等指标收进批量报告和统一归档，便于后续横向比较不同风格和不同后处理策略
 - 如果整个候选链路都失败，CLI 会返回 `AGENT_FALLBACK_REQUIRED`，交给 agent 做最后兜底
 - 当前已新增 deterministic 创意包评测层，可对已有创意包做打分、推荐和排序
 - 当前已新增完整方案层，可基于创意包生成 deterministic / llm 两种故事方案，并把写作简报一并落到 SQLite
 - 当前已新增正文 payload 层和正文草稿层，可基于已选方案生成稳定 payload，并产出 deterministic / llm 两种 Markdown 成稿草稿
+- `build_story_drafts` 现已支持可选自动修订后处理：默认关闭；开启 `auto_revise=true` 后，会在建稿完成后自动落分析/修订轨迹，并把修订后的正文回写到当前 draft
+- 当前 deterministic 自动修订链已补齐 span 定位与重叠过滤，fresh SQLite 下可稳定跑通 `build_story_drafts(auto_revise=true) -> inspect`
 - 当前 deterministic 正文基线已经补到可在 fresh SQLite 链路下通过 `build_story_drafts -> inspect -> save` 端到端 smoke，适合作为流程和测试基线
 - deterministic 版仍然只负责流程稳定、数据库和测试基线，不代表生产可用质量
 - LLM 版已经接入，但仍需要持续做真实卡组评估、提示词调优和线上验收
@@ -128,6 +150,11 @@ short_novel_write/
 │  ├─ story_payload_builder.py
 │  ├─ story_draft_builder.py
 │  ├─ story_draft_llm_builder.py
+│  ├─ story_prose_analyzer.py
+│  ├─ story_revision_runner.py
+│  ├─ story_style_profile.py
+│  ├─ story_span_judge.py
+│  ├─ story_span_rewriter.py
 │  ├─ story_plan_builder.py
 │  ├─ story_plan_llm_builder.py
 │  ├─ story_regression_runner.py
@@ -150,6 +177,10 @@ short_novel_write/
 │     ├─ test_story_payload_builder.py
 │     ├─ test_story_draft_builder.py
 │     ├─ test_story_draft_llm_builder.py
+│     ├─ test_story_prose_analyzer.py
+│     ├─ test_story_revision_runner.py
+│     ├─ test_story_style_profile.py
+│     ├─ test_story_span_rewriter.py
 │     ├─ test_story_plan_builder.py
 │     ├─ test_story_plan_llm_builder.py
 │     ├─ test_story_regression_runner.py
@@ -163,6 +194,7 @@ short_novel_write/
 - 开发目录里可以保留实现过程文档、参考项目或其他内部资料
 - 发布目录默认只同步可公开的主工具链内容，不会把所有开发辅助材料一并带出去
 - 当前推荐工作流是：开发目录只做本地 `git commit`，发布目录负责对外 `git push`
+- 临时开发分支只允许留在本地；要对外发布时，必须先把有效改动合并或摘回开发目录 `main`，再从发布目录 `main` 推送
 
 ## 核心设计
 
@@ -229,6 +261,7 @@ Tool 层负责“怎么稳定执行”。
 
 - 输入：`stdin JSON`
 - 输出：`stdout JSON`
+- 为兼容 Windows 默认控制台编码，CLI 现在统一输出 ASCII-safe JSON；中文字段会保留在 JSON 结构里，但内容按 `\uXXXX` 形式转义，便于父进程稳定解析
 - 成功退出码：`0`
 - 失败退出码：`1`
 
@@ -251,6 +284,10 @@ chcp 65001 > $null
 - `build_story_plans`
 - `build_story_payloads`
 - `build_story_drafts`
+- `analyze_story_prose`
+- `build_style_profile`
+- `rewrite_story_spans`
+- `revise_story_draft`
 - `get_llm_config`
 - `export_llm_config`
 - `apply_llm_config`
@@ -272,9 +309,14 @@ chcp 65001 > $null
 - `list_story_plans`
 - `list_story_payloads`
 - `list_story_drafts`
+- `list_story_draft_analyses`
+- `list_style_profiles`
+- `get_style_profile`
+- `list_story_draft_revisions`
 - `update_idea_pack_status`
 - `update_story_plan_status`
 - `update_story_draft_status`
+- `archive_run`
 - `save`
 - `check_structure`
 - `check_quality`
@@ -296,6 +338,18 @@ chcp 65001 > $null
 
 - `story_payloads`
 - `story_drafts`
+
+默认正文分析结果也保存在同一个 SQLite 里：
+
+- `story_draft_analyses`
+
+默认风格画像也保存在同一个 SQLite 里：
+
+- `story_style_profiles`
+
+默认正文修订记录也保存在同一个 SQLite 里：
+
+- `story_draft_revisions`
 
 默认 LLM 配置也存放在同一个 SQLite 里：
 
@@ -636,15 +690,16 @@ $env:OPENROUTER_API_KEY = "你的 OpenRouter Key"
 现在 skill 收尾已经接成这条链：
 
 1. 正文写完
-2. 优先用 `inspect` 做第一轮自动自检
-3. 读取：
+2. 如果目标是直接产出可保存版本，优先在 `build_story_drafts` 阶段开启 `auto_revise=true`
+3. 再用 `inspect` 做第一轮自动自检
+4. 读取：
    - `data.overall_ok`
    - `data.structure.issues`
    - `data.quality.issues`
    - `data.quality.suggestions`
-4. 修订问题
-5. 用 `save` 落盘
-6. 记录：
+5. 修订问题
+6. 用 `save` 落盘
+7. 记录：
    - `data.output_dir`
    - `data.output_path`
    - `data.directory_created`
@@ -681,6 +736,11 @@ $env:PYTHONDONTWRITEBYTECODE='1'
 - `tests/tools/test_story_draft_llm_builder.py`
 - `tests/tools/test_story_plan_builder.py`
 - `tests/tools/test_story_plan_llm_builder.py`
+- `tests/tools/test_story_prose_analyzer.py`
+- `tests/tools/test_story_style_profile.py`
+- `tests/tools/test_story_span_judge.py`
+- `tests/tools/test_story_span_rewriter.py`
+- `tests/tools/test_story_revision_runner.py`
 - `tests/tools/test_story_regression_runner.py`
 - `tests/tools/test_story_cli.py`
 - `tests/tools/test_story_cli_idea_pipeline.py`
@@ -694,6 +754,7 @@ $env:PYTHONDONTWRITEBYTECODE='1'
 - [quality-checklist.md](./references/quality-checklist.md)
 - [开发目录与发布目录隔离方案](./docs/开发目录与发布目录隔离方案.md)
 - [真实样本回归 runner 使用说明](./docs/真实样本回归runner使用说明.md)
+- [验收阶段执行方案](./docs/验收阶段执行方案.md)
 
 ## 下一步建议
 

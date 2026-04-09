@@ -48,6 +48,12 @@ CREATE TABLE IF NOT EXISTS archive_jobs (
     selected_plan_id INTEGER,
     selected_payload_id INTEGER,
     selected_draft_id INTEGER,
+    selected_draft_auto_revised INTEGER NOT NULL DEFAULT 0,
+    selected_draft_revision_round_count INTEGER NOT NULL DEFAULT 0,
+    selected_draft_content_changed INTEGER NOT NULL DEFAULT 0,
+    selected_draft_body_chars_before_revision INTEGER NOT NULL DEFAULT 0,
+    selected_draft_body_chars_after_revision INTEGER NOT NULL DEFAULT 0,
+    selected_draft_body_char_delta INTEGER NOT NULL DEFAULT 0,
     inspect_overall_ok INTEGER NOT NULL,
     inspect_summary_chars INTEGER NOT NULL,
     inspect_body_chars INTEGER NOT NULL,
@@ -229,6 +235,15 @@ CREATE INDEX IF NOT EXISTS idx_archive_story_drafts_job_selected
     ON archive_story_drafts(job_id, selected_flag, source_draft_id);
 """
 
+ARCHIVE_JOB_EXTRA_COLUMNS = {
+    "selected_draft_auto_revised": "INTEGER NOT NULL DEFAULT 0",
+    "selected_draft_revision_round_count": "INTEGER NOT NULL DEFAULT 0",
+    "selected_draft_content_changed": "INTEGER NOT NULL DEFAULT 0",
+    "selected_draft_body_chars_before_revision": "INTEGER NOT NULL DEFAULT 0",
+    "selected_draft_body_chars_after_revision": "INTEGER NOT NULL DEFAULT 0",
+    "selected_draft_body_char_delta": "INTEGER NOT NULL DEFAULT 0",
+}
+
 
 class ArchiveError(Exception):
     pass
@@ -240,6 +255,17 @@ def utc_now() -> str:
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _ensure_archive_jobs_columns(connection: sqlite3.Connection) -> None:
+    existing_columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(archive_jobs)").fetchall()
+    }
+    for column_name, column_sql in ARCHIVE_JOB_EXTRA_COLUMNS.items():
+        if column_name in existing_columns:
+            continue
+        connection.execute(f"ALTER TABLE archive_jobs ADD COLUMN {column_name} {column_sql}")
 
 
 def _read_json_file(path: Path) -> dict[str, Any]:
@@ -312,10 +338,13 @@ def _build_archive_payload(
     job_id: str,
 ) -> dict[str, Any]:
     case = _extract_primary_case(report)
+    selected_draft = case.get("selected_draft", {})
+    if not isinstance(selected_draft, dict):
+        selected_draft = {}
     selected_pack_id = int(case.get("selected_pack", {}).get("pack_id") or 0) or None
     selected_plan_id = int(case.get("selected_plan", {}).get("plan_id") or 0) or None
     selected_payload_id = int(case.get("selected_payload", {}).get("payload_id") or 0) or None
-    selected_draft_id = int(case.get("selected_draft", {}).get("draft_id") or 0) or None
+    selected_draft_id = int(selected_draft.get("draft_id") or 0) or None
 
     selected_card_id: int | None = None
     if selected_pack_id is not None:
@@ -531,6 +560,16 @@ def _build_archive_payload(
         "selected_plan_id": selected_plan_id,
         "selected_payload_id": selected_payload_id,
         "selected_draft_id": selected_draft_id,
+        "selected_draft_auto_revised": 1 if bool(selected_draft.get("auto_revised", False)) else 0,
+        "selected_draft_revision_round_count": int(selected_draft.get("revision_round_count", 0) or 0),
+        "selected_draft_content_changed": 1 if bool(selected_draft.get("content_changed", False)) else 0,
+        "selected_draft_body_chars_before_revision": int(
+            selected_draft.get("body_char_count_before_revision", 0) or 0
+        ),
+        "selected_draft_body_chars_after_revision": int(
+            selected_draft.get("body_char_count_after_revision", selected_draft.get("body_char_count", 0)) or 0
+        ),
+        "selected_draft_body_char_delta": int(selected_draft.get("body_char_count_delta", 0) or 0),
         "inspect_overall_ok": 1 if bool(case.get("inspect", {}).get("overall_ok")) else 0,
         "inspect_summary_chars": int(case.get("inspect", {}).get("summary_chars", 0) or 0),
         "inspect_body_chars": int(case.get("inspect", {}).get("body_chars", 0) or 0),
@@ -584,6 +623,7 @@ class StoryArchiveStore:
         with closing(self._connect()) as connection:
             with connection:
                 connection.executescript(ARCHIVE_SCHEMA_SQL)
+                _ensure_archive_jobs_columns(connection)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
@@ -736,10 +776,13 @@ class StoryArchiveStore:
                 job_id, job_status, prompt, style, case_key, case_notes, run_dir, source_db_path,
                 report_path, run_started_at, run_finished_at, wall_time_seconds, total_token_usage_json,
                 selected_card_id, selected_pack_id, selected_plan_id, selected_payload_id, selected_draft_id,
+                selected_draft_auto_revised, selected_draft_revision_round_count, selected_draft_content_changed,
+                selected_draft_body_chars_before_revision, selected_draft_body_chars_after_revision,
+                selected_draft_body_char_delta,
                 inspect_overall_ok, inspect_summary_chars, inspect_body_chars, inspect_issues_json,
                 report_json, archive_version, archived_at, source_db_deleted, source_db_deleted_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row["job_id"],
@@ -760,6 +803,12 @@ class StoryArchiveStore:
                 row["selected_plan_id"],
                 row["selected_payload_id"],
                 row["selected_draft_id"],
+                row["selected_draft_auto_revised"],
+                row["selected_draft_revision_round_count"],
+                row["selected_draft_content_changed"],
+                row["selected_draft_body_chars_before_revision"],
+                row["selected_draft_body_chars_after_revision"],
+                row["selected_draft_body_char_delta"],
                 row["inspect_overall_ok"],
                 row["inspect_summary_chars"],
                 row["inspect_body_chars"],

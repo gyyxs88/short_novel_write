@@ -50,7 +50,24 @@ from tools.story_plan_llm_builder import (
     build_llm_story_plans_with_fallbacks,
 )
 from tools.story_quality_checker import check_story_quality_markdown
-from tools.story_structure_checker import check_story_markdown
+from tools.story_prose_analyzer import ANALYZER_NAME, analyze_story_prose_markdown
+from tools.story_style_profile import (
+    build_style_profile,
+    get_builtin_style_profile,
+    list_builtin_style_profiles,
+)
+from tools.story_revision_runner import revise_story_draft_deterministic
+from tools.story_span_judge import (
+    apply_llm_judge_to_changed_spans,
+    build_llm_story_span_judgement_with_fallbacks,
+)
+from tools.story_span_rewriter import rewrite_story_spans_deterministic
+from tools.story_structure_checker import (
+    check_story_markdown,
+    count_content_chars,
+    extract_chapters,
+    extract_section,
+)
 from tools.story_token_usage import (
     build_empty_token_usage,
     has_token_usage,
@@ -64,6 +81,10 @@ SUPPORTED_ACTIONS = {
     "check_structure",
     "check_quality",
     "inspect",
+    "analyze_story_prose",
+    "build_style_profile",
+    "rewrite_story_spans",
+    "revise_story_draft",
     "generate_ideas",
     "match_idea_cards",
     "store_idea_cards",
@@ -93,6 +114,10 @@ SUPPORTED_ACTIONS = {
     "list_story_plans",
     "list_story_payloads",
     "list_story_drafts",
+    "list_story_draft_analyses",
+    "list_style_profiles",
+    "get_style_profile",
+    "list_story_draft_revisions",
     "update_idea_pack_status",
     "update_story_plan_status",
     "update_story_draft_status",
@@ -140,6 +165,13 @@ def build_error_response(
     if details:
         response["error"]["details"] = details
     return response
+
+
+def emit_response(response: dict[str, Any]) -> None:
+    # CLI 面向 agent/脚本消费，统一输出 ASCII-safe JSON，避免 Windows 默认编码把整条链路打断。
+    sys.stdout.write(json.dumps(response, ensure_ascii=True))
+    sys.stdout.write("\n")
+    sys.stdout.flush()
 
 
 def append_token_usage_details(
@@ -250,6 +282,25 @@ def ensure_optional_string(
         raise CliRequestError(
             "INVALID_REQUEST",
             f"{field_name} 必须是非空字符串。",
+            action=action,
+        )
+    return value
+
+
+def ensure_optional_bool(
+    payload: dict[str, Any],
+    field_name: str,
+    action: str,
+    *,
+    default: bool,
+) -> bool:
+    value = payload.get(field_name)
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise CliRequestError(
+            "INVALID_REQUEST",
+            f"{field_name} 必须是布尔值。",
             action=action,
         )
     return value
@@ -377,6 +428,35 @@ def resolve_content_input(payload: dict[str, Any], action: str) -> str:
         ) from exc
 
 
+def resolve_story_prose_input(
+    payload: dict[str, Any],
+    action: str,
+) -> tuple[str, str, dict[str, Any] | None]:
+    draft_id = payload.get("draft_id")
+    has_draft_id = isinstance(draft_id, int) and not isinstance(draft_id, bool)
+    has_content = isinstance(payload.get("content"), str) and bool(payload.get("content").strip())
+    has_file_path = isinstance(payload.get("file_path"), str) and bool(payload.get("file_path").strip())
+    input_source_count = sum((has_draft_id, has_content, has_file_path))
+    if input_source_count != 1:
+        raise CliRequestError(
+            "INVALID_INPUT_SOURCE",
+            "draft_id、content 和 file_path 必须且只能传一个。",
+            action=action,
+        )
+
+    style = ensure_optional_string(payload, "style", action) or ""
+    if has_draft_id:
+        try:
+            repository = get_repository(payload, action)
+            draft = repository.get_story_draft(draft_id=draft_id)
+        except ValueError as exc:
+            raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+        payload_style = draft.get("payload", {}).get("payload_style", "")
+        return draft["content_markdown"], style or payload_style, draft
+
+    return resolve_content_input(payload, action), style, None
+
+
 def handle_save(payload: dict[str, Any], action: str) -> dict[str, Any]:
     title = ensure_string_field(payload, "title", action)
     content = ensure_string_field(payload, "content", action)
@@ -451,6 +531,569 @@ def handle_inspect(payload: dict[str, Any], action: str) -> dict[str, Any]:
         "overall_ok": structure_data["is_valid"] and quality_data["is_passable"],
         "structure": structure_data,
         "quality": quality_data,
+    }
+
+
+def handle_analyze_story_prose(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    profile_name = ensure_optional_string(payload, "profile_name", action) or ""
+    analyzer_name = ensure_optional_string(payload, "analyzer_name", action) or ANALYZER_NAME
+    content, style, draft = resolve_story_prose_input(payload, action)
+    if profile_name and not style:
+        builtin_profile = get_builtin_style_profile(profile_name)
+        if builtin_profile is not None:
+            style = builtin_profile["style"]
+        else:
+            try:
+                repository = get_repository(payload, action)
+                stored_profile = repository.get_story_style_profile(profile_name=profile_name)
+                style = stored_profile["style"]
+            except ValueError:
+                pass
+    report = analyze_story_prose_markdown(content, style=style)
+    report.analyzer_name = analyzer_name
+    data = report.to_dict()
+    data["profile_name"] = profile_name
+    data["stored"] = False
+    data["analysis_id"] = None
+    data["draft_id"] = draft["draft_id"] if draft else None
+
+    if draft is None:
+        return data
+
+    try:
+        repository = get_repository(payload, action)
+        stored_analysis = repository.create_story_draft_analysis(
+            draft_id=draft["draft_id"],
+            analyzer_name=analyzer_name,
+            style=style,
+            profile_name=profile_name,
+            overall_score=report.overall_score,
+            dimension_scores=report.dimension_scores,
+            issue_count=report.issue_count,
+            analysis_report=data,
+        )
+    except ValueError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+
+    data["stored"] = True
+    data["analysis_id"] = stored_analysis["analysis_id"]
+    return data
+
+
+def _merge_style_profiles(
+    stored_items: list[dict[str, Any]],
+    *,
+    style: str | None = None,
+    source_type: str | None = None,
+) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for builtin_profile in list_builtin_style_profiles():
+        if style is not None and builtin_profile["style"] != style:
+            continue
+        if source_type is not None and source_type != "built_in":
+            continue
+        merged[builtin_profile["profile_name"]] = {
+            "style_profile_id": None,
+            "profile_name": builtin_profile["profile_name"],
+            "source_type": builtin_profile["source_type"],
+            "style": builtin_profile["style"],
+            "profile": builtin_profile,
+            "created_at": "",
+            "updated_at": "",
+            "builtin": True,
+            "stored": False,
+        }
+
+    for item in stored_items:
+        merged[item["profile_name"]] = {
+            **item,
+            "builtin": item["source_type"] == "built_in" and item["profile_name"] in {
+                profile["profile_name"] for profile in list_builtin_style_profiles()
+            },
+            "stored": True,
+        }
+
+    return sorted(
+        merged.values(),
+        key=lambda item: (item["profile_name"] not in {"zhihu_tight_hook", "douban_subtle_scene"}, item["profile_name"]),
+    )
+
+
+def handle_build_style_profile(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    profile_name = ensure_string_field(payload, "profile_name", action)
+    style = ensure_optional_string(payload, "style", action)
+    builtin_profile_name = ensure_optional_string(payload, "builtin_profile_name", action)
+    sample_texts = ensure_optional_string_list(payload, "sample_texts", action)
+    if sample_texts is not None and builtin_profile_name is not None:
+        raise CliRequestError(
+            "INVALID_REQUEST",
+            "sample_texts 和 builtin_profile_name 不能同时传。",
+            action=action,
+        )
+
+    try:
+        built_profile = build_style_profile(
+            profile_name=profile_name,
+            style=style,
+            sample_texts=sample_texts,
+            builtin_profile_name=builtin_profile_name,
+        )
+        repository = get_repository(payload, action)
+        stored_profile = repository.upsert_story_style_profile(
+            profile_name=built_profile["profile_name"],
+            source_type=built_profile["source_type"],
+            style=built_profile["style"],
+            profile=built_profile,
+        )
+    except ValueError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+
+    return stored_profile
+
+
+def resolve_style_profile(
+    payload: dict[str, Any],
+    action: str,
+    *,
+    profile_name: str | None,
+) -> dict[str, Any] | None:
+    if not profile_name:
+        return None
+    builtin_profile = get_builtin_style_profile(profile_name)
+    if builtin_profile is not None:
+        return builtin_profile
+    try:
+        repository = get_repository(payload, action)
+        stored_profile = repository.get_story_style_profile(profile_name=profile_name)
+    except ValueError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+    return stored_profile["profile"]
+
+
+def build_updated_story_draft_fields(
+    draft: dict[str, Any],
+    *,
+    content_markdown: str,
+) -> dict[str, Any]:
+    summary_text = extract_section(content_markdown, "简介") or draft["summary_text"]
+    body_text = extract_section(content_markdown, "正文")
+    chapters = extract_chapters(body_text) if body_text else []
+    if chapters:
+        body_char_count = sum(count_content_chars(chapter_body) for _, chapter_body in chapters)
+    elif body_text:
+        body_char_count = count_content_chars(body_text)
+    else:
+        body_char_count = draft["body_char_count"]
+    return {
+        "title": draft["title"],
+        "content_markdown": content_markdown,
+        "summary_text": summary_text,
+        "body_char_count": body_char_count,
+    }
+
+
+def build_story_draft_change_metrics(
+    *,
+    initial_draft: dict[str, Any],
+    final_draft: dict[str, Any],
+) -> dict[str, Any]:
+    before_content_markdown = str(initial_draft.get("content_markdown", "") or "")
+    after_content_markdown = str(final_draft.get("content_markdown", "") or "")
+    body_char_count_before_revision = int(initial_draft.get("body_char_count", 0) or 0)
+    body_char_count_after_revision = int(final_draft.get("body_char_count", 0) or 0)
+    body_char_count_delta = body_char_count_after_revision - body_char_count_before_revision
+    return {
+        "content_changed": before_content_markdown != after_content_markdown,
+        "body_char_count_before_revision": body_char_count_before_revision,
+        "body_char_count_after_revision": body_char_count_after_revision,
+        "body_char_count_delta": body_char_count_delta,
+    }
+
+
+def build_rewrite_review_metadata(rewrite_result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "risk_alerts": list(rewrite_result.get("risk_alerts", [])),
+        "risk_alert_count": int(rewrite_result.get("risk_alert_count", 0) or 0),
+    }
+
+
+def apply_optional_llm_judge_to_rewrite_result(
+    *,
+    before_content_markdown: str,
+    rewrite_result: dict[str, Any],
+    style: str,
+    judge_environment_config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    review_metadata = build_rewrite_review_metadata(rewrite_result)
+    if rewrite_result.get("changed_span_count", 0) <= 0:
+        return {
+            **rewrite_result,
+            "review_metadata": review_metadata,
+        }
+    if judge_environment_config is None:
+        return {
+            **rewrite_result,
+            "review_metadata": review_metadata,
+        }
+
+    try:
+        judge_result = build_llm_story_span_judgement_with_fallbacks(
+            before_content_markdown=before_content_markdown,
+            changed_spans=rewrite_result["changed_spans"],
+            style=style,
+            routes=judge_environment_config["routes"],
+            agent_fallback=judge_environment_config["agent_fallback"],
+        )
+    except LlmExhaustedError as exc:
+        candidate_spans = [
+            {
+                **span,
+                "judge_decision": "review",
+                "judge_reason": "LLM 判定链路失败，待 agent 复核。",
+                "agent_review_required": True,
+            }
+            for span in rewrite_result.get("changed_spans", [])
+        ]
+        review_metadata.update(
+            {
+                "candidate_changed_span_count": len(candidate_spans),
+                "candidate_changed_spans": candidate_spans,
+                "agent_review_required_count": len(candidate_spans),
+                "agent_review_required_spans": candidate_spans,
+                "llm_judge_error": {
+                    "code": "AGENT_FALLBACK_REQUIRED" if exc.agent_fallback_required else "UPSTREAM_ERROR",
+                    "message": str(exc),
+                    "attempts": exc.attempts,
+                    "token_usage": normalize_token_usage(exc.token_usage),
+                },
+            }
+        )
+        return {
+            **rewrite_result,
+            "review_metadata": review_metadata,
+            "revision_summary": (
+                f"{rewrite_result['revision_summary']} "
+                f"LLM 判定失败，当前仅保留风险提醒，并建议 agent 复核 {len(candidate_spans)} 个片段。"
+            ).strip(),
+        }
+
+    judged_rewrite_result = apply_llm_judge_to_changed_spans(
+        before_content_markdown=before_content_markdown,
+        rewrite_result=rewrite_result,
+        judge_result=judge_result,
+    )
+    merged_review_metadata = build_rewrite_review_metadata(rewrite_result)
+    merged_review_metadata.update(judged_rewrite_result.get("review_metadata", {}))
+    return {
+        **judged_rewrite_result,
+        "review_metadata": merged_review_metadata,
+    }
+
+
+def execute_story_draft_revision(
+    repository: StoryIdeaRepository,
+    *,
+    draft: dict[str, Any],
+    profile_name: str,
+    profile: dict[str, Any] | None,
+    style: str,
+    analyzer_name: str,
+    revision_modes: list[str] | None,
+    issue_codes: list[str] | None,
+    max_rounds: int,
+    max_spans_per_round: int,
+    apply_to_draft: bool,
+    judge_environment_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    def span_judge_fn(**judge_kwargs: Any) -> dict[str, Any]:
+        return apply_optional_llm_judge_to_rewrite_result(
+            before_content_markdown=str(judge_kwargs["before_content_markdown"]),
+            rewrite_result=judge_kwargs["rewrite_result"],
+            style=style,
+            judge_environment_config=judge_environment_config,
+        )
+
+    revised = revise_story_draft_deterministic(
+        content_markdown=draft["content_markdown"],
+        style=style,
+        profile=profile,
+        analyzer_name=analyzer_name,
+        revision_modes=revision_modes,
+        issue_codes=issue_codes,
+        max_rounds=max_rounds,
+        max_spans_per_round=max_spans_per_round,
+        span_judge_fn=span_judge_fn,
+    )
+
+    initial_analysis = repository.create_story_draft_analysis(
+        draft_id=draft["draft_id"],
+        analyzer_name=analyzer_name,
+        style=style,
+        profile_name=profile_name,
+        overall_score=revised["initial_overall_score"],
+        dimension_scores=revised["initial_analysis_report"]["dimension_scores"],
+        issue_count=revised["initial_issue_count"],
+        analysis_report=revised["initial_analysis_report"],
+    )
+    current_analysis_id = initial_analysis["analysis_id"]
+    current_content = revised["before_content_markdown"]
+    stored_rounds: list[dict[str, Any]] = []
+
+    for round_item in revised["rounds"]:
+        round_revision_modes = (
+            round_item["requested_revision_modes"]
+            if round_item["requested_revision_modes"]
+            else sorted(
+                {
+                    mode
+                    for changed_span in round_item["changed_spans"]
+                    for mode in changed_span["requested_rewrite_modes"]
+                }
+            )
+            or ["remove_ai_phrases"]
+        )
+        stored_revision = repository.create_story_draft_revision(
+            draft_id=draft["draft_id"],
+            analysis_id=current_analysis_id,
+            generation_mode=revised["generation_mode"],
+            revision_modes=round_revision_modes,
+            before_content_markdown=current_content,
+            after_content_markdown=round_item["after_content_markdown"],
+            changed_spans=round_item["changed_spans"],
+            revision_summary=round_item["revision_summary"],
+            review_metadata=round_item.get("review_metadata", {}),
+        )
+        current_content = round_item["after_content_markdown"]
+        stored_analysis = repository.create_story_draft_analysis(
+            draft_id=draft["draft_id"],
+            analyzer_name=analyzer_name,
+            style=style,
+            profile_name=profile_name,
+            overall_score=round_item["analysis_report_after"]["overall_score"],
+            dimension_scores=round_item["analysis_report_after"]["dimension_scores"],
+            issue_count=round_item["analysis_report_after"]["issue_count"],
+            analysis_report=round_item["analysis_report_after"],
+        )
+        stored_rounds.append(
+            {
+                "round_index": round_item["round_index"],
+                "analysis_id": current_analysis_id,
+                "revision_id": stored_revision["revision_id"],
+                "post_analysis_id": stored_analysis["analysis_id"],
+                "changed_span_count": round_item["changed_span_count"],
+                "risk_alert_count": round_item.get("risk_alert_count", 0),
+                "review_metadata": round_item.get("review_metadata", {}),
+                "revision_summary": round_item["revision_summary"],
+                "revision_modes": round_revision_modes,
+            }
+        )
+        current_analysis_id = stored_analysis["analysis_id"]
+
+    updated_draft = draft
+    if apply_to_draft and revised["round_count"] > 0 and revised["after_content_markdown"] != draft["content_markdown"]:
+        updated_fields = build_updated_story_draft_fields(
+            draft,
+            content_markdown=revised["after_content_markdown"],
+        )
+        updated_draft = repository.update_story_draft_content(
+            draft_id=draft["draft_id"],
+            title=updated_fields["title"],
+            content_markdown=updated_fields["content_markdown"],
+            summary_text=updated_fields["summary_text"],
+            body_char_count=updated_fields["body_char_count"],
+        )
+
+    return {
+        "draft_id": draft["draft_id"],
+        "generation_mode": revised["generation_mode"],
+        "style": style,
+        "profile_name": profile_name,
+        "analyzer_name": analyzer_name,
+        "requested_revision_modes": revised["requested_revision_modes"],
+        "requested_issue_codes": revised["requested_issue_codes"],
+        "max_rounds": revised["max_rounds"],
+        "max_spans_per_round": revised["max_spans_per_round"],
+        "round_count": revised["round_count"],
+        "stop_reason": revised["stop_reason"],
+        "before_content_markdown": revised["before_content_markdown"],
+        "after_content_markdown": revised["after_content_markdown"],
+        "initial_analysis_id": initial_analysis["analysis_id"],
+        "final_analysis_id": current_analysis_id,
+        "initial_issue_count": revised["initial_issue_count"],
+        "final_issue_count": revised["final_issue_count"],
+        "issue_count_delta": revised["issue_count_delta"],
+        "initial_overall_score": revised["initial_overall_score"],
+        "final_overall_score": revised["final_overall_score"],
+        "overall_score_delta": revised["overall_score_delta"],
+        "rounds": stored_rounds,
+        "auto_revised": revised["round_count"] > 0 and revised["after_content_markdown"] != draft["content_markdown"],
+        "updated_draft": updated_draft,
+    }
+
+
+def handle_rewrite_story_spans(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    draft_id = payload.get("draft_id")
+    if isinstance(draft_id, bool) or not isinstance(draft_id, int):
+        raise CliRequestError("INVALID_REQUEST", "draft_id 必须是整数。", action=action)
+    analysis_id = payload.get("analysis_id")
+    if analysis_id is not None and (isinstance(analysis_id, bool) or not isinstance(analysis_id, int)):
+        raise CliRequestError("INVALID_REQUEST", "analysis_id 必须是整数。", action=action)
+
+    generation_mode = payload.get("generation_mode", "deterministic")
+    if not isinstance(generation_mode, str) or generation_mode != "deterministic":
+        raise CliRequestError(
+            "INVALID_REQUEST",
+            "当前 rewrite_story_spans 只支持 generation_mode=deterministic。",
+            action=action,
+        )
+
+    profile_name = ensure_optional_string(payload, "profile_name", action) or ""
+    rewrite_modes = ensure_optional_string_list(payload, "rewrite_modes", action)
+    issue_codes = ensure_optional_string_list(payload, "issue_codes", action)
+    max_spans = ensure_optional_positive_int(payload, "max_spans", action, default=3)
+    judge_llm_environment = ensure_optional_string(payload, "judge_llm_environment", action)
+    judge_llm_model_keys_override = ensure_optional_string_list(payload, "judge_llm_model_keys_override", action)
+
+    if judge_llm_model_keys_override is not None and judge_llm_environment is None:
+        raise CliRequestError(
+            "INVALID_REQUEST",
+            "judge_llm_model_keys_override 只能和 judge_llm_environment 一起使用。",
+            action=action,
+        )
+
+    try:
+        repository = get_repository(payload, action)
+        _judge_config_store, judge_environment_config, _judge_llm_model_keys_override = resolve_llm_environment_config(
+            payload,
+            action,
+            llm_environment=judge_llm_environment,
+            llm_model_keys_override=judge_llm_model_keys_override,
+        )
+        draft = repository.get_story_draft(draft_id=draft_id)
+        analysis = (
+            repository.get_story_draft_analysis(analysis_id=analysis_id)
+            if analysis_id is not None
+            else repository.get_latest_story_draft_analysis(draft_id=draft_id)
+        )
+        profile = resolve_style_profile(
+            payload,
+            action,
+            profile_name=profile_name or analysis["profile_name"],
+        )
+        rewritten = rewrite_story_spans_deterministic(
+            content_markdown=draft["content_markdown"],
+            analysis_report=analysis["analysis_report"],
+            style=analysis["style"] or draft.get("payload", {}).get("payload_style", ""),
+            profile=profile,
+            rewrite_modes=rewrite_modes,
+            issue_codes=issue_codes,
+            max_spans=max_spans,
+        )
+        rewritten = apply_optional_llm_judge_to_rewrite_result(
+            before_content_markdown=draft["content_markdown"],
+            rewrite_result=rewritten,
+            style=analysis["style"] or draft.get("payload", {}).get("payload_style", ""),
+            judge_environment_config=judge_environment_config,
+        )
+        revision_modes = (
+            rewrite_modes
+            if rewrite_modes
+            else sorted(
+                {
+                    mode
+                    for item in rewritten["changed_spans"]
+                    for mode in item["requested_rewrite_modes"]
+                }
+            )
+            or ["remove_ai_phrases"]
+        )
+        stored_revision = repository.create_story_draft_revision(
+            draft_id=draft["draft_id"],
+            analysis_id=analysis["analysis_id"],
+            generation_mode=rewritten["generation_mode"],
+            revision_modes=revision_modes,
+            before_content_markdown=draft["content_markdown"],
+            after_content_markdown=rewritten["after_content_markdown"],
+            changed_spans=rewritten["changed_spans"],
+            revision_summary=rewritten["revision_summary"],
+            review_metadata=rewritten.get("review_metadata", {}),
+        )
+    except ValueError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+
+    return stored_revision
+
+
+def handle_revise_story_draft(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    draft_id = payload.get("draft_id")
+    if isinstance(draft_id, bool) or not isinstance(draft_id, int):
+        raise CliRequestError("INVALID_REQUEST", "draft_id 必须是整数。", action=action)
+
+    generation_mode = payload.get("generation_mode", "deterministic")
+    if not isinstance(generation_mode, str) or generation_mode != "deterministic":
+        raise CliRequestError(
+            "INVALID_REQUEST",
+            "当前 revise_story_draft 只支持 generation_mode=deterministic。",
+            action=action,
+        )
+
+    profile_name = ensure_optional_string(payload, "profile_name", action) or ""
+    style = ensure_optional_string(payload, "style", action) or ""
+    analyzer_name = ensure_optional_string(payload, "analyzer_name", action) or ANALYZER_NAME
+    revision_modes = ensure_optional_string_list(payload, "revision_modes", action)
+    issue_codes = ensure_optional_string_list(payload, "issue_codes", action)
+    judge_llm_environment = ensure_optional_string(payload, "judge_llm_environment", action)
+    judge_llm_model_keys_override = ensure_optional_string_list(payload, "judge_llm_model_keys_override", action)
+    max_rounds = ensure_optional_positive_int(payload, "max_rounds", action, default=2)
+    max_spans_per_round = ensure_optional_positive_int(
+        payload,
+        "max_spans_per_round",
+        action,
+        default=3,
+    )
+    if judge_llm_model_keys_override is not None and judge_llm_environment is None:
+        raise CliRequestError(
+            "INVALID_REQUEST",
+            "judge_llm_model_keys_override 只能和 judge_llm_environment 一起使用。",
+            action=action,
+        )
+
+    try:
+        repository = get_repository(payload, action)
+        _judge_config_store, judge_environment_config, _judge_llm_model_keys_override = resolve_llm_environment_config(
+            payload,
+            action,
+            llm_environment=judge_llm_environment,
+            llm_model_keys_override=judge_llm_model_keys_override,
+        )
+        draft = repository.get_story_draft(draft_id=draft_id)
+        profile = resolve_style_profile(payload, action, profile_name=profile_name)
+        resolved_style = (
+            style
+            or (profile.get("style", "") if isinstance(profile, dict) else "")
+            or draft.get("payload", {}).get("payload_style", "")
+        )
+        revised = execute_story_draft_revision(
+            repository,
+            draft=draft,
+            profile_name=profile_name,
+            profile=profile,
+            style=resolved_style,
+            analyzer_name=analyzer_name,
+            revision_modes=revision_modes,
+            issue_codes=issue_codes,
+            max_rounds=max_rounds,
+            max_spans_per_round=max_spans_per_round,
+            apply_to_draft=False,
+            judge_environment_config=judge_environment_config,
+        )
+    except ValueError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+
+    return {
+        key: value
+        for key, value in revised.items()
+        if key != "updated_draft" and key != "auto_revised"
     }
 
 
@@ -1211,6 +1854,24 @@ def handle_build_story_drafts(payload: dict[str, Any], action: str) -> dict[str,
     api_mode = ensure_optional_string(payload, "api_mode", action)
     llm_environment = ensure_optional_string(payload, "llm_environment", action)
     llm_model_keys_override = ensure_optional_string_list(payload, "llm_model_keys_override", action)
+    auto_revise = ensure_optional_bool(payload, "auto_revise", action, default=False)
+    revision_profile_name = ensure_optional_string(payload, "revision_profile_name", action) or ""
+    revision_modes = ensure_optional_string_list(payload, "revision_modes", action)
+    revision_issue_codes = ensure_optional_string_list(payload, "revision_issue_codes", action)
+    judge_llm_environment = ensure_optional_string(payload, "judge_llm_environment", action)
+    judge_llm_model_keys_override = ensure_optional_string_list(payload, "judge_llm_model_keys_override", action)
+    revision_max_rounds = ensure_optional_positive_int(
+        payload,
+        "revision_max_rounds",
+        action,
+        default=2,
+    )
+    revision_max_spans_per_round = ensure_optional_positive_int(
+        payload,
+        "revision_max_spans_per_round",
+        action,
+        default=3,
+    )
     batch_id = payload.get("batch_id")
     payload_ids = payload.get("payload_ids")
     if (batch_id is None) == (payload_ids is None):
@@ -1251,6 +1912,30 @@ def handle_build_story_drafts(payload: dict[str, Any], action: str) -> dict[str,
             "llm_model_keys_override 只能和 generation_mode=llm 一起使用。",
             action=action,
         )
+    if judge_llm_model_keys_override is not None and judge_llm_environment is None:
+        raise CliRequestError(
+            "INVALID_REQUEST",
+            "judge_llm_model_keys_override 只能和 judge_llm_environment 一起使用。",
+            action=action,
+        )
+    has_revision_options = any(
+        field_name in payload
+        for field_name in (
+            "revision_profile_name",
+            "revision_modes",
+            "revision_issue_codes",
+            "judge_llm_environment",
+            "judge_llm_model_keys_override",
+            "revision_max_rounds",
+            "revision_max_spans_per_round",
+        )
+    )
+    if not auto_revise and has_revision_options:
+        raise CliRequestError(
+            "INVALID_REQUEST",
+            "revision_* 参数只能和 auto_revise=true 一起使用。",
+            action=action,
+        )
 
     try:
         repository = get_repository(payload, action)
@@ -1259,6 +1944,12 @@ def handle_build_story_drafts(payload: dict[str, Any], action: str) -> dict[str,
             action,
             llm_environment=llm_environment,
             llm_model_keys_override=llm_model_keys_override,
+        )
+        _judge_config_store, judge_environment_config, _judge_llm_model_keys_override = resolve_llm_environment_config(
+            payload,
+            action,
+            llm_environment=judge_llm_environment,
+            llm_model_keys_override=judge_llm_model_keys_override,
         )
         story_payloads = repository.get_story_payloads_for_draft_build(
             batch_id=batch_id,
@@ -1278,6 +1969,16 @@ def handle_build_story_drafts(payload: dict[str, Any], action: str) -> dict[str,
         fallback_used_count = 0
         total_token_usage = build_empty_token_usage()
         items: list[dict[str, Any]] = []
+        auto_revised_count = 0
+        draft_changed_count = 0
+        revision_round_count_total = 0
+        body_char_delta_total = 0
+        body_char_change_total = 0
+        revision_profile = (
+            resolve_style_profile(payload, action, profile_name=revision_profile_name)
+            if auto_revise and revision_profile_name
+            else None
+        )
         for stored_payload in story_payloads:
             payload_data = {
                 **stored_payload["payload"],
@@ -1337,21 +2038,63 @@ def handle_build_story_drafts(payload: dict[str, Any], action: str) -> dict[str,
                 created_count += 1
             else:
                 existing_count += 1
+            final_draft = repository.get_story_draft(draft_id=stored_draft["draft_id"])
+            revision_result: dict[str, Any] | None = None
+            auto_revised_flag = False
+            revision_round_count = 0
+            if auto_revise:
+                resolved_revision_style = (
+                    revision_profile.get("style", "") if isinstance(revision_profile, dict) else ""
+                ) or stored_payload["style"]
+                revision_result = execute_story_draft_revision(
+                    repository,
+                    draft=final_draft,
+                    profile_name=revision_profile_name,
+                    profile=revision_profile,
+                    style=resolved_revision_style,
+                    analyzer_name=ANALYZER_NAME,
+                    revision_modes=revision_modes,
+                    issue_codes=revision_issue_codes,
+                    max_rounds=revision_max_rounds,
+                    max_spans_per_round=revision_max_spans_per_round,
+                    apply_to_draft=True,
+                    judge_environment_config=judge_environment_config,
+                )
+                final_draft = revision_result["updated_draft"]
+                auto_revised_flag = bool(revision_result["auto_revised"])
+                revision_round_count = int(revision_result["round_count"] or 0)
+                if auto_revised_flag:
+                    auto_revised_count += 1
+            draft_change_metrics = build_story_draft_change_metrics(
+                initial_draft=stored_draft,
+                final_draft=final_draft,
+            )
+            if draft_change_metrics["content_changed"]:
+                draft_changed_count += 1
+            revision_round_count_total += revision_round_count
+            body_char_delta_total += draft_change_metrics["body_char_count_delta"]
+            body_char_change_total += abs(draft_change_metrics["body_char_count_delta"])
             items.append(
                 {
-                    "draft_id": stored_draft["draft_id"],
-                    "payload_id": stored_draft["payload_id"],
-                    "title": stored_draft["title"],
+                    "draft_id": final_draft["draft_id"],
+                    "payload_id": final_draft["payload_id"],
+                    "title": final_draft["title"],
                     "status": stored_draft["status"],
-                    "generation_mode": stored_draft["generation_mode"],
-                    "provider_name": stored_draft.get("provider_name", ""),
-                    "api_mode": stored_draft.get("api_mode", ""),
-                    "model_name": stored_draft.get("model_name", ""),
-                    "model_config_key": stored_draft.get("model_config_key", ""),
+                    "generation_mode": final_draft["generation_mode"],
+                    "provider_name": final_draft.get("provider_name", ""),
+                    "api_mode": final_draft.get("api_mode", ""),
+                    "model_name": final_draft.get("model_name", ""),
+                    "model_config_key": final_draft.get("model_config_key", ""),
                     "attempt_count": attempt_count,
                     "fallback_used": fallback_used,
                     "attempts": attempts,
                     "token_usage": normalize_token_usage(current_token_usage),
+                    "auto_revised": auto_revised_flag,
+                    "revision_round_count": revision_round_count,
+                    "revision_stop_reason": revision_result["stop_reason"] if revision_result else "",
+                    "initial_analysis_id": revision_result["initial_analysis_id"] if revision_result else None,
+                    "final_analysis_id": revision_result["final_analysis_id"] if revision_result else None,
+                    **draft_change_metrics,
                 }
             )
         return {
@@ -1366,6 +2109,13 @@ def handle_build_story_drafts(payload: dict[str, Any], action: str) -> dict[str,
             "fallback_used_count": fallback_used_count,
             "created_count": created_count,
             "existing_count": existing_count,
+            "auto_revise": auto_revise,
+            "auto_revised_count": auto_revised_count,
+            "draft_changed_count": draft_changed_count,
+            "revision_round_count_total": revision_round_count_total,
+            "body_char_delta_total": body_char_delta_total,
+            "body_char_change_total": body_char_change_total,
+            "revision_profile_name": revision_profile_name,
             "token_usage": total_token_usage,
             "items": items,
         }
@@ -1599,6 +2349,92 @@ def handle_list_story_drafts(payload: dict[str, Any], action: str) -> dict[str, 
     return {"items": items, "count": len(items)}
 
 
+def handle_list_story_draft_analyses(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    batch_id = payload.get("batch_id")
+    draft_ids = payload.get("draft_ids")
+    analyzer_name = payload.get("analyzer_name")
+    profile_name = payload.get("profile_name")
+    try:
+        repository = get_repository(payload, action)
+        items = repository.list_story_draft_analyses(
+            batch_id=batch_id,
+            draft_ids=draft_ids,
+            analyzer_name=analyzer_name,
+            profile_name=profile_name,
+        )
+    except ValueError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+    return {"items": items, "count": len(items)}
+
+
+def handle_list_style_profiles(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    style = ensure_optional_string(payload, "style", action)
+    source_type = ensure_optional_string(payload, "source_type", action)
+    try:
+        repository = get_repository(payload, action)
+        stored_items = repository.list_story_style_profiles(
+            style=style,
+            source_type=source_type,
+        )
+    except ValueError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+
+    items = _merge_style_profiles(stored_items, style=style, source_type=source_type)
+    return {"items": items, "count": len(items)}
+
+
+def handle_get_style_profile(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    profile_name = ensure_string_field(payload, "profile_name", action)
+    builtin_profile = get_builtin_style_profile(profile_name)
+    try:
+        repository = get_repository(payload, action)
+        stored_profile = repository.get_story_style_profile(profile_name=profile_name)
+    except ValueError:
+        stored_profile = None
+
+    if stored_profile is not None:
+        return {
+            **stored_profile,
+            "builtin": builtin_profile is not None,
+            "stored": True,
+        }
+    if builtin_profile is not None:
+        return {
+            "style_profile_id": None,
+            "profile_name": builtin_profile["profile_name"],
+            "source_type": builtin_profile["source_type"],
+            "style": builtin_profile["style"],
+            "profile": builtin_profile,
+            "created_at": "",
+            "updated_at": "",
+            "builtin": True,
+            "stored": False,
+        }
+    raise CliRequestError(
+        "INVALID_REQUEST",
+        f"未找到 profile_name={profile_name} 的风格画像。",
+        action=action,
+    )
+
+
+def handle_list_story_draft_revisions(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    batch_id = payload.get("batch_id")
+    draft_ids = payload.get("draft_ids")
+    analysis_ids = payload.get("analysis_ids")
+    generation_mode = payload.get("generation_mode")
+    try:
+        repository = get_repository(payload, action)
+        items = repository.list_story_draft_revisions(
+            batch_id=batch_id,
+            draft_ids=draft_ids,
+            analysis_ids=analysis_ids,
+            generation_mode=generation_mode,
+        )
+    except ValueError as exc:
+        raise CliRequestError("INVALID_REQUEST", str(exc), action=action) from exc
+    return {"items": items, "count": len(items)}
+
+
 def handle_update_idea_pack_status(payload: dict[str, Any], action: str) -> dict[str, Any]:
     pack_id = payload.get("pack_id")
     if isinstance(pack_id, bool) or not isinstance(pack_id, int):
@@ -1691,6 +2527,14 @@ def dispatch_action(action: str, payload: dict[str, Any]) -> dict[str, Any]:
         return handle_check_quality(payload, action)
     if action == "inspect":
         return handle_inspect(payload, action)
+    if action == "analyze_story_prose":
+        return handle_analyze_story_prose(payload, action)
+    if action == "build_style_profile":
+        return handle_build_style_profile(payload, action)
+    if action == "rewrite_story_spans":
+        return handle_rewrite_story_spans(payload, action)
+    if action == "revise_story_draft":
+        return handle_revise_story_draft(payload, action)
     if action == "generate_ideas":
         return handle_generate_ideas(payload, action)
     if action == "match_idea_cards":
@@ -1749,6 +2593,14 @@ def dispatch_action(action: str, payload: dict[str, Any]) -> dict[str, Any]:
         return handle_list_story_payloads(payload, action)
     if action == "list_story_drafts":
         return handle_list_story_drafts(payload, action)
+    if action == "list_story_draft_analyses":
+        return handle_list_story_draft_analyses(payload, action)
+    if action == "list_style_profiles":
+        return handle_list_style_profiles(payload, action)
+    if action == "get_style_profile":
+        return handle_get_style_profile(payload, action)
+    if action == "list_story_draft_revisions":
+        return handle_list_story_draft_revisions(payload, action)
     if action == "update_idea_pack_status":
         return handle_update_idea_pack_status(payload, action)
     if action == "update_story_plan_status":
@@ -1768,11 +2620,11 @@ def main() -> int:
         action, payload = validate_request(request)
         data = dispatch_action(action, payload)
         response = build_success_response(action, data)
-        print(json.dumps(response, ensure_ascii=False))
+        emit_response(response)
         return 0
     except CliRequestError as exc:
         response = build_error_response(exc.code, exc.message, exc.action or action, exc.details)
-        print(json.dumps(response, ensure_ascii=False))
+        emit_response(response)
         return 1
     except Exception as exc:  # pragma: no cover - 兜底分支
         response = build_error_response(
@@ -1780,7 +2632,7 @@ def main() -> int:
             f"未预期异常：{exc}",
             action,
         )
-        print(json.dumps(response, ensure_ascii=False))
+        emit_response(response)
         return 1
 
 

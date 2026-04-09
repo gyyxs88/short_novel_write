@@ -58,6 +58,57 @@ class GenerationRoute:
 
 
 @dataclass(frozen=True)
+class DraftPostprocessConfig:
+    auto_revise: bool = False
+    revision_profile_name: str | None = None
+    revision_modes: tuple[str, ...] = ()
+    revision_issue_codes: tuple[str, ...] = ()
+    revision_max_rounds: int = 2
+    revision_max_spans_per_round: int = 3
+
+    def __post_init__(self) -> None:
+        normalized_profile_name = (
+            self.revision_profile_name.strip() if isinstance(self.revision_profile_name, str) else None
+        )
+        normalized_modes = tuple(
+            item.strip() for item in self.revision_modes if isinstance(item, str) and item.strip()
+        )
+        normalized_issue_codes = tuple(
+            item.strip() for item in self.revision_issue_codes if isinstance(item, str) and item.strip()
+        )
+        object.__setattr__(self, "revision_profile_name", normalized_profile_name or None)
+        object.__setattr__(self, "revision_modes", normalized_modes)
+        object.__setattr__(self, "revision_issue_codes", normalized_issue_codes)
+
+        if not isinstance(self.auto_revise, bool):
+            raise ValueError("auto_revise 必须是布尔值。")
+        if not isinstance(self.revision_max_rounds, int) or self.revision_max_rounds < 1:
+            raise ValueError("revision_max_rounds 必须大于等于 1。")
+        if not isinstance(self.revision_max_spans_per_round, int) or self.revision_max_spans_per_round < 1:
+            raise ValueError("revision_max_spans_per_round 必须大于等于 1。")
+        if not self.auto_revise and (
+            normalized_profile_name is not None or normalized_modes or normalized_issue_codes
+        ):
+            raise ValueError("关闭 auto_revise 时，不应再传 revision_* 配置。")
+
+    def to_action_payload(self) -> dict[str, object]:
+        if not self.auto_revise:
+            return {}
+        payload: dict[str, object] = {
+            "auto_revise": True,
+            "revision_max_rounds": self.revision_max_rounds,
+            "revision_max_spans_per_round": self.revision_max_spans_per_round,
+        }
+        if self.revision_profile_name is not None:
+            payload["revision_profile_name"] = self.revision_profile_name
+        if self.revision_modes:
+            payload["revision_modes"] = list(self.revision_modes)
+        if self.revision_issue_codes:
+            payload["revision_issue_codes"] = list(self.revision_issue_codes)
+        return payload
+
+
+@dataclass(frozen=True)
 class RegressionSample:
     sample_key: str
     style: str
@@ -75,6 +126,7 @@ class RegressionSample:
         generation_mode="llm",
         llm_environment="zhihu_draft_default",
     )
+    draft_postprocess: DraftPostprocessConfig = DraftPostprocessConfig()
     selected_plan_variant_index: int = 1
     enabled: bool = True
     notes: str = ""
@@ -116,12 +168,37 @@ class RegressionSample:
             raise ValueError("plan_count 必须大于等于 1。")
         if not isinstance(self.selected_plan_variant_index, int) or self.selected_plan_variant_index < 1:
             raise ValueError("selected_plan_variant_index 必须大于等于 1。")
+        if not isinstance(self.draft_postprocess, DraftPostprocessConfig):
+            raise ValueError("draft_postprocess 必须是 DraftPostprocessConfig。")
 
 
 _ZHIHU_PLAN_ROUTE = GenerationRoute(generation_mode="llm", llm_environment="zhihu_plan_default")
 _ZHIHU_DRAFT_ROUTE = GenerationRoute(generation_mode="llm", llm_environment="zhihu_draft_default")
 _DOUBAN_PLAN_ROUTE = GenerationRoute(generation_mode="llm", llm_environment="douban_plan_default")
 _DOUBAN_DRAFT_ROUTE = GenerationRoute(generation_mode="llm", llm_environment="douban_draft_default")
+_ZHIHU_DRAFT_POSTPROCESS = DraftPostprocessConfig(
+    auto_revise=True,
+    revision_profile_name="zhihu_tight_hook",
+    revision_modes=("remove_ai_phrases", "compress_exposition", "concretize_emotion"),
+    revision_max_rounds=2,
+    revision_max_spans_per_round=3,
+)
+_DOUBAN_DRAFT_POSTPROCESS = DraftPostprocessConfig(
+    auto_revise=True,
+    revision_profile_name="douban_subtle_scene",
+    revision_modes=("remove_ai_phrases", "compress_exposition", "concretize_emotion", "strengthen_scene"),
+    revision_max_rounds=2,
+    revision_max_spans_per_round=3,
+)
+
+
+def build_default_draft_postprocess(style: str) -> DraftPostprocessConfig:
+    normalized_style = style.strip()
+    if normalized_style == "zhihu":
+        return _ZHIHU_DRAFT_POSTPROCESS
+    if normalized_style == "douban":
+        return _DOUBAN_DRAFT_POSTPROCESS
+    raise ValueError(f"style 仅支持：{sorted(VALID_STYLES)}")
 
 
 BUILTIN_SAMPLES = (
@@ -131,6 +208,7 @@ BUILTIN_SAMPLES = (
         prompt="婚礼前夜，女主收到失踪前任的求救短信，被迫在婚礼开始前查清旧案和未婚夫秘密，默认知乎风格，1-3万字。",
         plan_route=_ZHIHU_PLAN_ROUTE,
         draft_route=_ZHIHU_DRAFT_ROUTE,
+        draft_postprocess=_ZHIHU_DRAFT_POSTPROCESS,
         notes="已在真实校准里验证过。",
         tags=("default", "verified", "zhihu"),
     ),
@@ -140,6 +218,7 @@ BUILTIN_SAMPLES = (
         prompt="离婚冷静期最后一天，女主收到丈夫的死亡赔偿通知，可丈夫昨晚明明还在家里，默认知乎风格，1-3万字。",
         plan_route=_ZHIHU_PLAN_ROUTE,
         draft_route=_ZHIHU_DRAFT_ROUTE,
+        draft_postprocess=_ZHIHU_DRAFT_POSTPROCESS,
         notes="已在真实校准里验证过。",
         tags=("default", "verified", "zhihu"),
     ),
@@ -149,6 +228,7 @@ BUILTIN_SAMPLES = (
         prompt="头部女主播在婚礼直播时收到绑匪发来的倒计时视频，视频里的被绑者竟是三年前失踪的弟弟，她必须在热搜炸开前查出幕后操盘者，默认知乎风格，1-3万字。",
         plan_route=_ZHIHU_PLAN_ROUTE,
         draft_route=_ZHIHU_DRAFT_ROUTE,
+        draft_postprocess=_ZHIHU_DRAFT_POSTPROCESS,
         notes="新增知乎强钩子样本。",
         tags=("default", "zhihu"),
     ),
@@ -158,6 +238,7 @@ BUILTIN_SAMPLES = (
         prompt="葬礼主持结束后，女主收到自己的讣告推送，发布时间却是明天凌晨，她必须在二十四小时内查出是谁提前替她写好了死亡结局，默认知乎风格，1-3万字。",
         plan_route=_ZHIHU_PLAN_ROUTE,
         draft_route=_ZHIHU_DRAFT_ROUTE,
+        draft_postprocess=_ZHIHU_DRAFT_POSTPROCESS,
         notes="新增知乎倒计时样本。",
         tags=("default", "zhihu"),
     ),
@@ -167,6 +248,7 @@ BUILTIN_SAMPLES = (
         prompt="父亲遗嘱要求女主在四十八小时内带着前男友回旧宅开锁，否则全部遗产自动捐出，可锁里藏着一宗十年前命案的最后证据，默认知乎风格，1-3万字。",
         plan_route=_ZHIHU_PLAN_ROUTE,
         draft_route=_ZHIHU_DRAFT_ROUTE,
+        draft_postprocess=_ZHIHU_DRAFT_POSTPROCESS,
         notes="新增知乎高概念样本。",
         tags=("default", "zhihu"),
     ),
@@ -176,6 +258,7 @@ BUILTIN_SAMPLES = (
         prompt="母亲葬礼结束后，女主在旧书里翻到高中恋人写给自己的未寄出信，决定回小城住一周，默认豆瓣风格，1-2万字。",
         plan_route=_DOUBAN_PLAN_ROUTE,
         draft_route=_DOUBAN_DRAFT_ROUTE,
+        draft_postprocess=_DOUBAN_DRAFT_POSTPROCESS,
         notes="已在真实校准里验证过。",
         tags=("default", "verified", "douban"),
     ),
@@ -185,6 +268,7 @@ BUILTIN_SAMPLES = (
         prompt="停业多年的老影院准备拆除前一周，女主回城整理遗物，在放映室里找到少年时暗恋对象留下的录音带，默认豆瓣风格，1-2万字。",
         plan_route=_DOUBAN_PLAN_ROUTE,
         draft_route=_DOUBAN_DRAFT_ROUTE,
+        draft_postprocess=_DOUBAN_DRAFT_POSTPROCESS,
         notes="新增豆瓣关系余味样本。",
         tags=("default", "douban"),
     ),
@@ -194,6 +278,7 @@ BUILTIN_SAMPLES = (
         prompt="暴雨夜最后一班火车停在小站，女主被迫和多年未见的姐姐共住候车室，旧日失踪案和家里最不能提的那个人一起被翻出来，默认豆瓣风格，1-2万字。",
         plan_route=_DOUBAN_PLAN_ROUTE,
         draft_route=_DOUBAN_DRAFT_ROUTE,
+        draft_postprocess=_DOUBAN_DRAFT_POSTPROCESS,
         notes="新增豆瓣家庭关系样本。",
         tags=("default", "douban"),
     ),
@@ -203,6 +288,7 @@ BUILTIN_SAMPLES = (
         prompt="外婆去世后，女主拿到一把从未见过的旧钥匙，顺着地址回到海边小城，发现少年时最亲近的人早就替她藏起一段没人肯说的往事，默认豆瓣风格，1-2万字。",
         plan_route=_DOUBAN_PLAN_ROUTE,
         draft_route=_DOUBAN_DRAFT_ROUTE,
+        draft_postprocess=_DOUBAN_DRAFT_POSTPROCESS,
         notes="新增豆瓣返乡样本。",
         tags=("default", "douban"),
     ),
@@ -212,6 +298,7 @@ BUILTIN_SAMPLES = (
         prompt="档案馆整理旧照片时，女主发现母亲年轻时和自己初恋站在同一张合影里，她只好回到阔别多年的厂区宿舍，把那段被全家默许删除的关系重新拼起来，默认豆瓣风格，1-2万字。",
         plan_route=_DOUBAN_PLAN_ROUTE,
         draft_route=_DOUBAN_DRAFT_ROUTE,
+        draft_postprocess=_DOUBAN_DRAFT_POSTPROCESS,
         notes="新增豆瓣记忆追索样本。",
         tags=("default", "douban"),
     ),

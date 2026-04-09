@@ -10,6 +10,7 @@ from tools.story_idea_pack_llm_builder import (
     LlmResponseError,
     LlmTransportError,
     TransportFn,
+    build_chat_message_content,
     build_provider_chat_completions_options,
     build_direct_route_candidate,
     describe_route,
@@ -205,7 +206,7 @@ def build_story_plan_chat_completions_payload(
         "messages": [
             {
                 "role": "system",
-                "content": (
+                "content": build_chat_message_content(
                     "你是中文短篇小说策划编辑。"
                     "你必须只返回一个 JSON 对象，不要返回 Markdown 代码块，不要解释。"
                     "顶层字段固定为 plans，plans 是数组。"
@@ -216,7 +217,7 @@ def build_story_plan_chat_completions_payload(
             },
             {
                 "role": "user",
-                "content": (
+                "content": build_chat_message_content(
                     f"{prompt}\n"
                     "请只返回一个 JSON 对象，格式示例："
                     '{"plans":[{"variant_label":"方案一","title":"示例标题","genre_tone":"...","selling_point":"...",'

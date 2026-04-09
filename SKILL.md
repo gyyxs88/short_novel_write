@@ -62,6 +62,12 @@ chcp 65001 > $null
 
 `build_story_plans -> build_story_payloads -> build_story_drafts -> inspect -> save`
 
+如果当前目标是直接产出可进入保存阶段的版本，而不是保留原始首稿做对比：
+
+- 优先在 `build_story_drafts` 阶段显式开启 `auto_revise=true`
+- 同时传对应风格的 `revision_profile_name`
+- 让草稿在进入 `inspect` 前先走一轮自动修订后处理
+
 如果存在可用的 LLM 配置：
 
 - 创意包、方案、正文草稿都优先尝试 `generation_mode="llm"`
@@ -234,6 +240,11 @@ chcp 65001 > $null
 5. 需要记录筛选结果时，用 `update_story_draft_status`
 6. 如果走 LLM 链，正文阶段可以和方案阶段使用不同 `llm_environment`
 7. 对豆瓣风格，正文环境默认要比方案环境更保守，优先给更长 timeout，不要直接复用知乎或方案阶段的环境
+8. 如果当前要直接交付本地成稿，优先在 `build_story_drafts` 时开启：
+   - `auto_revise=true`
+   - 知乎风传 `revision_profile_name="zhihu_tight_hook"`
+   - 豆瓣风传 `revision_profile_name="douban_subtle_scene"`
+9. 只有在需要保留“原始首稿”和“修订后稿”做对比时，才关闭 `auto_revise`
 
 ### 7. 完稿自检
 
@@ -257,6 +268,11 @@ chcp 65001 > $null
 
 如果 `overall_ok = false`，先根据问题修订，再决定是否进入保存阶段。  
 自检时，基于正文再生成 `1` 个候选标题，与暂定标题比较后决定最终标题。
+
+如果当前正文来自 `build_story_drafts` 且已开启 `auto_revise`：
+
+- `inspect` 默认直接检查修订后的 draft 主记录
+- 不需要再额外手动调用一次 `revise_story_draft` 才进入自检
 
 如果当前成稿来自 `build_story_drafts`：
 
