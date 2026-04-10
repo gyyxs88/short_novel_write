@@ -20,6 +20,8 @@ def test_build_style_profile_from_builtin_uses_builtin_shape() -> None:
     assert profile["source_type"] == "built_in"
     assert profile["style"] == "zhihu"
     assert profile["preferred_traits"]
+    assert "并没有立刻" in profile["avoid_phrases"]
+    assert "带着某种" in profile["avoid_phrases"]
 
 
 def test_build_style_profile_from_samples_generates_metrics_and_rules() -> None:

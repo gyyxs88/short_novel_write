@@ -29,6 +29,27 @@ VALID_STORY = """# 雨夜来信
 晚上九点，门铃真的响了。猫眼外站着的人，穿着姐姐下葬那天的黑裙子。可我终于明白，真正可怕的不是门外那张脸，而是母亲在我身后轻声说出的那句话。她说，别开门，因为死在河里的那个人，一开始就不是你姐姐。
 """
 
+REMINDER_SIGNAL_STORY = """# 回楼的人
+
+## 简介
+
+她回旧楼搬最后一趟东西，却在门口看见多年不见的人。
+
+## 正文
+
+### 1
+
+她把纸箱靠到墙边，抬手去敲门。门一开，对方眼底闪过一丝停顿，又笑着说：“你来得比我记得早。”
+
+### 2
+
+她没有立刻进门，只站在门槛外看着屋里的灯。那人让开半步，话里带着审视意味，像是早就知道她会回来。
+
+### 3
+
+她把箱子搬进屋，鞋底蹭过门口积下的灰。对方的语气不容置疑，不是要她坐下歇一会儿，而是要她把今晚没说完的话一次说清。
+"""
+
 
 def run_cli(raw_input: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -137,6 +158,24 @@ def test_analyze_story_prose_action_returns_prose_report() -> None:
     assert response["data"]["stored"] is False
     assert response["data"]["issue_count"] >= 0
     assert response["data"]["metrics"]["chapter_count"] == 3
+
+
+def test_analyze_story_prose_action_returns_reminder_risk_signals() -> None:
+    request = {
+        "action": "analyze_story_prose",
+        "payload": {
+            "content": REMINDER_SIGNAL_STORY,
+            "style": "douban",
+        },
+    }
+
+    result = run_cli(json.dumps(request, ensure_ascii=False))
+
+    assert result.returncode == 0
+    response = parse_stdout_json(result)
+    assert response["ok"] is True
+    assert response["data"]["risk_signal_count"] >= 3
+    assert any(item["signal_code"] == "eye_emotion_cue" for item in response["data"]["risk_signals"])
 
 
 def test_get_style_profile_action_returns_builtin_profile_without_db_record() -> None:

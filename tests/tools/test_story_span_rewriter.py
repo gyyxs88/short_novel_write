@@ -1,5 +1,6 @@
 from tools.story_prose_analyzer import analyze_story_prose_markdown
 from tools.story_span_rewriter import (
+    apply_remove_ai_phrases,
     rewrite_story_spans_deterministic,
     select_rewrite_targets,
 )
@@ -90,6 +91,16 @@ def test_rewrite_story_spans_deterministic_can_use_style_profile_avoid_phrases()
         and "那一刻" not in item["rewritten_text"]
         for item in result["changed_spans"]
     )
+
+
+def test_apply_remove_ai_phrases_handles_curated_soft_risk_phrases() -> None:
+    rewritten = apply_remove_ai_phrases("她并没有立刻回头，只是带着某种克制的口气，说这件事还有一种别的意味。")
+
+    assert "并没有立刻" not in rewritten
+    assert "带着某种" not in rewritten
+    assert "某种" not in rewritten
+    assert "某种意味" not in rewritten
+    assert "没有立刻" in rewritten
 
 
 def test_rewrite_story_spans_deterministic_marks_high_risk_regret_fragment_as_alert() -> None:

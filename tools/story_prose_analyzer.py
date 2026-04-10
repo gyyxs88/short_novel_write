@@ -45,8 +45,12 @@ AI_ISM_PHRASES = (
     "仿佛",
     "似乎",
     "某种",
+    "带着某种",
+    "带着一种",
+    "某种意味",
     "其实",
     "原来",
+    "并没有立刻",
     "终于明白",
     "开始松动",
     "某种程度上",
@@ -162,6 +166,34 @@ KNOWN_OPENERS = (
 )
 GENERIC_PRONOUN_OPENERS = {"她", "他", "我"}
 QUESTION_SENTENCE_ENDINGS = ("？", "?")
+EYE_EMOTION_CUE_PATTERNS = (
+    re.compile(r"(眼神|眼底)[^。！？\n]{0,8}(闪过|闪烁)"),
+    re.compile(r"闪过一丝[^。！？\n]{0,10}"),
+)
+VAGUE_ATTITUDE_PATTERNS = (
+    re.compile(r"带着[^。！？\n]{0,10}意味"),
+    re.compile(r"带着[^。！？\n]{0,10}(态度|口吻)"),
+)
+LAZY_JUDGMENT_PHRASES = (
+    "不容拒绝",
+    "不容置疑",
+    "不易察觉",
+    "难以察觉",
+    "不可置信",
+)
+BALANCED_EXPLANATORY_PATTERNS = (
+    re.compile(r"不是[^。！？\n]{1,24}而是[^。！？\n]{1,24}"),
+    re.compile(r"不仅[^。！？\n]{1,24}更是[^。！？\n]{1,24}"),
+)
+ANIMAL_SIMILE_PATTERNS = (
+    re.compile(r"像一只[\u4e00-\u9fff]{1,4}"),
+    re.compile(r"像只[\u4e00-\u9fff]{1,4}"),
+)
+IMPACT_METAPHOR_PATTERNS = (
+    re.compile(r"(掀起|泛起)[^。！？\n]{0,8}(涟漪|波澜|巨浪)"),
+    re.compile(r"(像|如同)[^。！？\n]{0,16}(巨石|重锤|惊雷)"),
+    re.compile(r"(湖面|心湖|油锅)[^。！？\n]{0,10}(巨石|石子|炸弹|重锤|惊雷)"),
+)
 
 
 @dataclass(slots=True)
@@ -203,6 +235,30 @@ class StoryProseIssue:
 
 
 @dataclass(slots=True)
+class StoryProseRiskSignal:
+    signal_code: str
+    message: str
+    review_hint: str
+    chapter_number: int | None = None
+    span_text: str = ""
+    start_offset: int = 0
+    end_offset: int = 0
+    evidence: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "signal_code": self.signal_code,
+            "message": self.message,
+            "review_hint": self.review_hint,
+            "chapter_number": self.chapter_number,
+            "span_text": self.span_text,
+            "start_offset": self.start_offset,
+            "end_offset": self.end_offset,
+            "evidence": self.evidence,
+        }
+
+
+@dataclass(slots=True)
 class StoryProseAnalysisReport:
     title: str = ""
     style: str = ""
@@ -211,11 +267,16 @@ class StoryProseAnalysisReport:
     dimension_scores: dict[str, int] = field(default_factory=dict)
     metrics: dict[str, Any] = field(default_factory=dict)
     issues: list[StoryProseIssue] = field(default_factory=list)
+    risk_signals: list[StoryProseRiskSignal] = field(default_factory=list)
     suggestions: list[str] = field(default_factory=list)
 
     @property
     def issue_count(self) -> int:
         return len(self.issues)
+
+    @property
+    def risk_signal_count(self) -> int:
+        return len(self.risk_signals)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -227,6 +288,8 @@ class StoryProseAnalysisReport:
             "metrics": self.metrics,
             "issue_count": self.issue_count,
             "issues": [issue.to_dict() for issue in self.issues],
+            "risk_signal_count": self.risk_signal_count,
+            "risk_signals": [signal.to_dict() for signal in self.risk_signals],
             "suggestions": self.suggestions,
         }
 
@@ -315,9 +378,15 @@ def build_overall_score(dimension_scores: dict[str, int]) -> int:
     return max(0, min(100, round(sum(dimension_scores.values()) / len(dimension_scores))))
 
 
-def build_suggestions(issues: list[StoryProseIssue], *, style: str = "") -> list[str]:
+def build_suggestions(
+    issues: list[StoryProseIssue],
+    *,
+    style: str = "",
+    risk_signals: list[StoryProseRiskSignal] | None = None,
+) -> list[str]:
     suggestions: list[str] = []
     issue_codes = {issue.issue_code for issue in issues}
+    signal_codes = {signal.signal_code for signal in (risk_signals or [])}
     if "repeated_phrase" in issue_codes:
         suggestions.append("先删掉高频复用短语，把重复表达拆成更具体的动作、物件或句式。")
     if "repeated_paragraph_opener" in issue_codes:
@@ -330,6 +399,18 @@ def build_suggestions(issues: list[StoryProseIssue], *, style: str = "") -> list
         suggestions.append("给稀薄章节补一个具体场景，让空间、动作、声音或对话先落地，再承接情绪。")
     if "template_chapter" in issue_codes:
         suggestions.append("打散章节模板感，避免每章都按同一种段落职责和同一种起手节奏展开。")
+    if "eye_emotion_cue" in signal_codes:
+        suggestions.append("少用“眼神闪过”“眼底闪过”这类直给神态提示，优先换成动作、停顿或对白。")
+    if "vague_attitude_phrase" in signal_codes:
+        suggestions.append("少用“带着……意味/口吻/态度”这类空泛补缀词，尽量把意味落成具体说话方式或动作。")
+    if "lazy_judgment_phrase" in signal_codes:
+        suggestions.append("少用“不容置疑”“难以察觉”这类作者代判语，让读者从现场自己得出判断。")
+    if "balanced_explanatory_sentence" in signal_codes:
+        suggestions.append("控制“不是……而是……”这类整齐解释句的密度，必要时拆成两句写。")
+    if "animal_simile" in signal_codes:
+        suggestions.append("遇到“像一只……”这类动物比喻，先看它是不是人物真正会想到的比法，不贴就删。")
+    if "impact_metaphor_cliche" in signal_codes:
+        suggestions.append("少用“巨石”“惊雷”“涟漪”“波澜”这类冲击型套比喻，先看现场动作和结果能不能自己成立。")
     if style == "douban":
         suggestions.append("豆瓣风优先压掉空泛抒情，把余味落在具体场景和人物停顿上。")
     if style == "zhihu":
@@ -695,6 +776,156 @@ def analyze_template_chapters(chapters: list[ChapterSpan]) -> tuple[list[StoryPr
     }
 
 
+def _build_risk_signal(
+    *,
+    signal_code: str,
+    message: str,
+    review_hint: str,
+    chapter: ChapterSpan,
+    span_text: str,
+    evidence: dict[str, Any],
+) -> StoryProseRiskSignal:
+    start_offset, end_offset = locate_span_offsets(chapter, span_text)
+    return StoryProseRiskSignal(
+        signal_code=signal_code,
+        message=message,
+        review_hint=review_hint,
+        chapter_number=chapter.chapter_number,
+        span_text=span_text,
+        start_offset=start_offset,
+        end_offset=end_offset,
+        evidence=evidence,
+    )
+
+
+def analyze_soft_risk_signals(chapters: list[ChapterSpan]) -> tuple[list[StoryProseRiskSignal], dict[str, Any]]:
+    signal_groups: dict[str, list[StoryProseRiskSignal]] = defaultdict(list)
+
+    for chapter in chapters:
+        for sentence in split_sentences(chapter.content):
+            for pattern in EYE_EMOTION_CUE_PATTERNS:
+                match = pattern.search(sentence)
+                if match is None:
+                    continue
+                signal_groups["eye_emotion_cue"].append(
+                    _build_risk_signal(
+                        signal_code="eye_emotion_cue",
+                        message="这里用了“眼神/眼底闪过”一类神态提示，读感容易落回常见套路。",
+                        review_hint="先看这句是不是在直接替读者解释情绪；如果是，优先换成动作、停顿或对白。",
+                        chapter=chapter,
+                        span_text=sentence,
+                        evidence={"matched_text": match.group(0)},
+                    )
+                )
+                break
+
+            for pattern in VAGUE_ATTITUDE_PATTERNS:
+                match = pattern.search(sentence)
+                if match is None:
+                    continue
+                signal_groups["vague_attitude_phrase"].append(
+                    _build_risk_signal(
+                        signal_code="vague_attitude_phrase",
+                        message="这里用了“带着……意味/口吻/态度”一类空泛补缀词，容易把人物状态写虚。",
+                        review_hint="先看能不能把“意味/口吻/态度”拆成更具体的说话方式、动作或现场反应。",
+                        chapter=chapter,
+                        span_text=sentence,
+                        evidence={"matched_text": match.group(0)},
+                    )
+                )
+                break
+
+            matched_lazy_judgment = next((phrase for phrase in LAZY_JUDGMENT_PHRASES if phrase in sentence), "")
+            if matched_lazy_judgment:
+                signal_groups["lazy_judgment_phrase"].append(
+                    _build_risk_signal(
+                        signal_code="lazy_judgment_phrase",
+                        message="这里直接下了作者判断，读者看到的是结论，不是过程。",
+                        review_hint="先看这句能不能改成现场证据，让读者自己感觉到“强硬”“隐蔽”或“震惊”。",
+                        chapter=chapter,
+                        span_text=sentence,
+                        evidence={"matched_text": matched_lazy_judgment},
+                    )
+                )
+
+            for pattern in BALANCED_EXPLANATORY_PATTERNS:
+                match = pattern.search(sentence)
+                if match is None:
+                    continue
+                signal_groups["balanced_explanatory_sentence"].append(
+                    _build_risk_signal(
+                        signal_code="balanced_explanatory_sentence",
+                        message="这里用了过于整齐的平衡解释句，容易显得像总结或作者收束。",
+                        review_hint="先看这句是不是在替读者讲道理；如果是，考虑拆成两句，或让信息通过事件落地。",
+                        chapter=chapter,
+                        span_text=sentence,
+                        evidence={"matched_text": match.group(0)},
+                    )
+                )
+                break
+
+            for pattern in ANIMAL_SIMILE_PATTERNS:
+                match = pattern.search(sentence)
+                if match is None:
+                    continue
+                signal_groups["animal_simile"].append(
+                    _build_risk_signal(
+                        signal_code="animal_simile",
+                        message="这里用了“像一只……”的动物比喻，容易显得省力或落进常见套路。",
+                        review_hint="先看这个比喻是不是贴人物视角和现场语境；如果只是为了制造形象感，优先删掉或换成动作。",
+                        chapter=chapter,
+                        span_text=sentence,
+                        evidence={"matched_text": match.group(0)},
+                    )
+                )
+                break
+
+            for pattern in IMPACT_METAPHOR_PATTERNS:
+                match = pattern.search(sentence)
+                if match is None:
+                    continue
+                signal_groups["impact_metaphor_cliche"].append(
+                    _build_risk_signal(
+                        signal_code="impact_metaphor_cliche",
+                        message="这里用了冲击型套路比喻，读感容易落回常见的“巨石/惊雷/涟漪”套句。",
+                        review_hint="先看这句是不是在用比喻代替真正的事件冲击；如果是，优先改回动作、停顿或结果。",
+                        chapter=chapter,
+                        span_text=sentence,
+                        evidence={"matched_text": match.group(0)},
+                    )
+                )
+                break
+
+    ordered_codes = (
+        "eye_emotion_cue",
+        "vague_attitude_phrase",
+        "lazy_judgment_phrase",
+        "balanced_explanatory_sentence",
+        "animal_simile",
+        "impact_metaphor_cliche",
+    )
+    risk_signals: list[StoryProseRiskSignal] = []
+    metrics = {
+        "risk_signal_count": 0,
+        "risk_signal_total_hits": 0,
+        "risk_signal_counts": [],
+    }
+    for signal_code in ordered_codes:
+        items = signal_groups.get(signal_code, [])
+        if not items:
+            continue
+        risk_signals.extend(items[:2])
+        metrics["risk_signal_counts"].append(
+            {
+                "signal_code": signal_code,
+                "count": len(items),
+                "chapter_numbers": sorted({item.chapter_number for item in items if item.chapter_number is not None}),
+            }
+        )
+    metrics["risk_signal_total_hits"] = sum(item["count"] for item in metrics["risk_signal_counts"])
+    return risk_signals, metrics
+
+
 def analyze_story_prose_markdown(markdown_text: str, *, style: str = "") -> StoryProseAnalysisReport:
     report = StoryProseAnalysisReport()
     report.title = _extract_title(markdown_text)
@@ -712,8 +943,8 @@ def analyze_story_prose_markdown(markdown_text: str, *, style: str = "") -> Stor
         )
         report.dimension_scores = build_dimension_scores(report.issues)
         report.overall_score = build_overall_score(report.dimension_scores)
-        report.metrics = {"chapter_count": 0}
-        report.suggestions = build_suggestions(report.issues, style=report.style)
+        report.metrics = {"chapter_count": 0, "risk_signal_count": 0, "risk_signal_total_hits": 0, "risk_signal_counts": []}
+        report.suggestions = build_suggestions(report.issues, style=report.style, risk_signals=report.risk_signals)
         return report
 
     analyzers = (
@@ -730,11 +961,16 @@ def analyze_story_prose_markdown(markdown_text: str, *, style: str = "") -> Stor
         report.issues.extend(issues)
         metrics.update(analyzer_metrics)
 
+    risk_signals, risk_signal_metrics = analyze_soft_risk_signals(chapters)
+    report.risk_signals.extend(risk_signals)
+    metrics.update(risk_signal_metrics)
+
     report.dimension_scores = build_dimension_scores(report.issues)
     report.overall_score = build_overall_score(report.dimension_scores)
     metrics["issue_count"] = report.issue_count
+    metrics["risk_signal_count"] = report.risk_signal_count
     report.metrics = metrics
-    report.suggestions = build_suggestions(report.issues, style=report.style)
+    report.suggestions = build_suggestions(report.issues, style=report.style, risk_signals=report.risk_signals)
     return report
 
 

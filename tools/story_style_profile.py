@@ -54,7 +54,11 @@ BUILTIN_STYLE_PROFILES: dict[str, BuiltInStyleProfile] = {
         avoid_phrases=(
             "那一刻",
             "某种",
+            "带着某种",
+            "带着一种",
+            "某种意味",
             "其实",
+            "并没有立刻",
             "原来一切",
             "不由得",
         ),
@@ -89,8 +93,12 @@ BUILTIN_STYLE_PROFILES: dict[str, BuiltInStyleProfile] = {
             "回不到原来的样子",
             "终于明白",
             "某种",
+            "带着某种",
+            "带着一种",
+            "某种意味",
             "仿佛",
             "其实",
+            "并没有立刻",
         ),
         dialogue_rules=(
             "对话保留停顿、绕开和没说完的话，别把人物写成作者嘴替。",
@@ -219,7 +227,7 @@ def _build_preferred_traits(style: str, *, average_sentence_length: float, dialo
 
 
 def _build_avoid_phrases(style: str) -> list[str]:
-    common = ["那一刻", "某种", "其实", "不由得", "终于明白"]
+    common = ["那一刻", "某种", "带着某种", "带着一种", "某种意味", "其实", "不由得", "并没有立刻", "终于明白"]
     if style == "zhihu":
         return common + ["原来一切", "回不到原来的样子"]
     return common + ["仿佛", "似乎", "关系开始松动"]

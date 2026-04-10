@@ -85,6 +85,80 @@ DIALOGUE_FRAGMENT_STORY = """# 迟来的对话
 """
 
 
+SOFT_RISK_PHRASE_STORY = """# 雨夜名单
+
+## 简介
+
+旧名单被雨水泡开后，她意识到今晚不会像值班表上写的那样平静结束。
+
+## 正文
+
+### 1
+
+她并没有立刻开门，只把手按在门锁上。门外那句问候带着某种熟悉的拖音，像是故意把她往旧事里拉。
+
+### 2
+
+她并没有立刻回话，只盯着水迹往地板缝里渗。对方笑的时候还带着一种过分平稳的意味，让她想起名单上被划掉的第二个名字。
+
+### 3
+
+她并没有立刻后退。那句“别怕”里有某种意味不明的安抚，反而把走廊里的脚步声衬得更近。
+"""
+
+
+REMINDER_SIGNAL_STORY = """# 旧走廊
+
+## 简介
+
+她回旧楼拿走最后一只箱子，却在走廊尽头看见多年不见的人。
+
+## 正文
+
+### 1
+
+走廊的灯只亮了一半，她把纸箱放到墙边，抬手去按门铃。对方开门时，眼底闪过一丝停顿，接着笑着说：“你比我记得的来得早。”
+
+### 2
+
+她把箱角往上托了托，没有马上进门。那人侧身让路，话里带着审视意味，像是早就把她今晚会来算进了顺序里。
+
+### 3
+
+她低头看见门口那双旧拖鞋，手指压在箱带上，没有松开。她这才明白，真正让她停住的不是这层楼太冷，而是屋里那盏还替她留着的灯。
+
+### 4
+
+她把箱子搬进屋，鞋底蹭过门口积下的灰。桌上的杯口还有热气，这份热意不仅让她想起去年冬天，更是把她没说出口的话一起逼到了喉咙口。
+
+### 5
+
+她把门轻轻关上，背后那道锁舌咔哒一声落下。对方说话的语气不容置疑，像是早就替她把这次重逢的顺序排好了。
+"""
+
+
+METAPHOR_REMINDER_STORY = """# 失约夜
+
+## 简介
+
+她在约定取消后的夜里重新回到河边，想把那件事彻底想明白。
+
+## 正文
+
+### 1
+
+她站在桥边，听见手机震了一下。那条消息像一只猫一样轻轻蹭过来，偏偏让她整个人都绷住了。
+
+### 2
+
+他把最后一句解释发来时，那几个字像投入平静湖面的巨石，把她原本压住的念头全都掀了起来。
+
+### 3
+
+她把手机扣回口袋，沿着河栏往前走。原本想装作没事的心思，却在那一刻泛起一圈又一圈波澜。
+"""
+
+
 def test_analyze_story_prose_markdown_reports_repetition_abstraction_and_template_signals() -> None:
     report = analyze_story_prose_markdown(AI_ISH_STORY, style="zhihu")
 
@@ -130,4 +204,51 @@ def test_analyze_story_prose_markdown_skips_dialogue_question_fragments_for_abst
     assert not any(
         issue.issue_code == "abstract_emotion" and "你后悔吗" in issue.span_text
         for issue in report.issues
+    )
+
+
+def test_analyze_story_prose_markdown_counts_curated_soft_risk_phrases_as_ai_ism() -> None:
+    report = analyze_story_prose_markdown(SOFT_RISK_PHRASE_STORY, style="zhihu")
+
+    phrase_counts = {
+        item["phrase"]: item["count"]
+        for item in report.metrics["ai_ism_phrase_counts"]
+    }
+
+    assert any(issue.issue_code == "ai_ism" for issue in report.issues)
+    assert phrase_counts["并没有立刻"] == 3
+    assert phrase_counts["带着某种"] >= 1
+
+
+def test_analyze_story_prose_markdown_surfaces_reminder_only_risk_signals() -> None:
+    report = analyze_story_prose_markdown(REMINDER_SIGNAL_STORY, style="douban")
+
+    signal_codes = {signal.signal_code for signal in report.risk_signals}
+    issue_codes = {issue.issue_code for issue in report.issues}
+
+    assert report.risk_signal_count >= 4
+    assert "eye_emotion_cue" in signal_codes
+    assert "vague_attitude_phrase" in signal_codes
+    assert "balanced_explanatory_sentence" in signal_codes
+    assert "lazy_judgment_phrase" in signal_codes
+    assert "eye_emotion_cue" not in issue_codes
+    assert "balanced_explanatory_sentence" not in issue_codes
+    assert report.metrics["risk_signal_total_hits"] >= report.risk_signal_count
+    assert any("眼神闪过" in suggestion for suggestion in report.suggestions)
+
+
+def test_analyze_story_prose_markdown_surfaces_animal_and_impact_metaphor_signals() -> None:
+    report = analyze_story_prose_markdown(METAPHOR_REMINDER_STORY, style="zhihu")
+
+    signal_codes = {signal.signal_code for signal in report.risk_signals}
+
+    assert "animal_simile" in signal_codes
+    assert "impact_metaphor_cliche" in signal_codes
+    assert any("动物比喻" in signal.message for signal in report.risk_signals)
+    assert any("冲击型套路比喻" in signal.message for signal in report.risk_signals)
+    assert any(
+        "像一只" in signal.evidence.get("matched_text", "")
+        or "巨石" in signal.evidence.get("matched_text", "")
+        or "波澜" in signal.evidence.get("matched_text", "")
+        for signal in report.risk_signals
     )

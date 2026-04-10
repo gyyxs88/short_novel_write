@@ -65,6 +65,28 @@ REVIEW_DIALOGUE_STORY = """# 夜谈
 """
 
 
+REMINDER_ONLY_STORY = """# 回楼
+
+## 简介
+
+她回到旧楼取走最后一只箱子，却在门口重新看见那个本该消失的人。
+
+## 正文
+
+### 1
+
+走廊灯泡坏了一半，她把箱子放到墙边，抬手去敲门。门一开，对方眼神闪过一丝迟疑，又很快把笑意压了回去。
+
+### 2
+
+她没有马上进门，只用鞋尖碰了一下门槛。对方让开半步，话里带着试探意味，像是还在等她先把旧账提出来。
+
+### 3
+
+她侧身进屋，手背擦过门框上的灰。桌上那只杯子还有热气，这次重逢不是她想象中的平静叙旧，而是把没说完的话重新顶到了面前。
+"""
+
+
 def test_revise_story_draft_deterministic_runs_revision_rounds() -> None:
     result = revise_story_draft_deterministic(
         content_markdown=AI_ISH_STORY,
@@ -140,3 +162,20 @@ def test_revise_story_draft_deterministic_keeps_agent_review_queue_from_span_jud
     assert result["round_count"] == 1
     assert result["after_content_markdown"] != AI_ISH_STORY
     assert result["rounds"][0]["review_metadata"]["agent_review_required_count"] >= 1
+
+
+def test_revise_story_draft_deterministic_does_not_treat_reminder_only_signals_as_rewrite_targets() -> None:
+    result = revise_story_draft_deterministic(
+        content_markdown=REMINDER_ONLY_STORY,
+        style="douban",
+        profile=get_builtin_style_profile("douban_subtle_scene"),
+        revision_modes=["remove_ai_phrases", "concretize_emotion", "compress_exposition"],
+        max_rounds=1,
+        max_spans_per_round=2,
+    )
+
+    assert result["round_count"] == 0
+    assert result["stop_reason"] == "no_issues_remaining"
+    assert result["initial_analysis_report"]["risk_signal_count"] >= 2
+    assert result["initial_issue_count"] == 0
+    assert result["after_content_markdown"] == REMINDER_ONLY_STORY
